@@ -5,46 +5,76 @@
  * or have explicit permission to test.
  */
 
-#include <stdio.h>  /* printf, fprintf */
-#include <stdlib.h> /* EXIT_SUCCESS, EXIT_FAILURE, strtol */
-#include <string.h> /* strerror */
+#include <stdlib.h> /* calloc, free, EXIT_SUCCESS */
 
+#include "cli.h"
+#include "output.h"
 #include "scanner.h"
+#include "services.h"
+#include "utils.h"
+
+/* Exit codes, documented in the README. */
+#define EXIT_SCAN_ERROR 1  /* runtime problem, e.g. the host cannot be resolved */
+#define EXIT_USAGE_ERROR 2 /* invalid command-line input */
 
 int main(int argc, char *argv[])
 {
-    if (argc != 3 && argc != 4) {
-        fprintf(stderr, "Usage: %s <host> <port> [timeout_ms]\n", argv[0]);
-        return EXIT_FAILURE;
+    scan_options options;
+    parse_status status = parse_arguments(argc, argv, &options);
+    if (status == PARSE_EXIT_SUCCESS) {
+        return EXIT_SUCCESS;
+    }
+    if (status == PARSE_ERROR) {
+        free_options(&options);
+        return EXIT_USAGE_ERROR;
     }
 
-    /* Temporary, minimal parsing. Milestone 3 replaces this. */
-    char *end = NULL;
-    long port = strtol(argv[2], &end, 10);
-    if (end == argv[2] || *end != '\0' || port < 1 || port > 65535) {
-        fprintf(stderr, "janus: invalid port '%s' (expected 1-65535)\n", argv[2]);
-        return EXIT_FAILURE;
-    }
-
-    long timeout_ms = 1000;
-    if (argc == 4) {
-        timeout_ms = strtol(argv[3], &end, 10);
-        if (end == argv[3] || *end != '\0' || timeout_ms < 1 || timeout_ms > 60000) {
-            fprintf(stderr, "janus: invalid timeout '%s' (expected 1-60000)\n", argv[3]);
-            return EXIT_FAILURE;
-        }
-    }
+    int exit_code = EXIT_SUCCESS;
+    port_result *results = NULL;
 
     scan_target target;
-    if (resolve_target(argv[1], &target) != 0) {
-        return EXIT_FAILURE;
+    if (resolve_target(options.target, &target) != 0) {
+        exit_code = EXIT_SCAN_ERROR;
+        goto cleanup; /* one shared exit path that frees everything */
     }
 
-    port_result result = scan_port(&target, (uint16_t)port, (int)timeout_ms);
-    printf("%s:%ld %s\n", target.ip_text, port, port_state_to_string(result.state));
-    if (result.state == PORT_ERROR) {
-        fprintf(stderr, "janus: %s\n", strerror(result.error_code));
-        return EXIT_FAILURE;
+    results = calloc(options.port_count, sizeof *results);
+    if (results == NULL) {
+        print_error("out of memory");
+        exit_code = EXIT_SCAN_ERROR;
+        goto cleanup;
     }
-    return EXIT_SUCCESS;
+    for (size_t i = 0; i < options.port_count; i++) {
+        results[i].port = options.ports[i];
+        results[i].state = PORT_NOT_SCANNED;
+    }
+
+    scan_report report = {
+        .target = options.target,
+        .ip_address = target.ip_text,
+        .results = results,
+        .result_count = options.port_count,
+        .started_at = "",
+        .duration_ms = 0.0,
+        .interrupted = false,
+    };
+    if (format_utc_timestamp(report.started_at, sizeof report.started_at) != 0) {
+        report.started_at[0] = '\0';
+    }
+
+    double start_ms = monotonic_time_ms();
+    if (scan_port_range(&target, results, options.port_count,
+                        options.timeout_ms, options.thread_count) != 0) {
+        exit_code = EXIT_SCAN_ERROR;
+        goto cleanup;
+    }
+    report.duration_ms = monotonic_time_ms() - start_ms;
+
+    print_result_text(&report);
+
+cleanup:
+    close_service_database();
+    free(results);
+    free_options(&options);
+    return exit_code;
 }

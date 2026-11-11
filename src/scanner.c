@@ -148,6 +148,16 @@ port_result scan_port(const scan_target *target, uint16_t port, int timeout_ms)
     return result;
 }
 
+int scan_port_range(const scan_target *target, port_result *results, size_t count,
+                    int timeout_ms, int thread_count)
+{
+    (void)thread_count; /* sequential for now; Milestone 6 adds threads */
+    for (size_t i = 0; i < count; i++) {
+        results[i] = scan_port(target, results[i].port, timeout_ms);
+    }
+    return 0;
+}
+
 const char *port_state_to_string(port_state state)
 {
     switch (state) {

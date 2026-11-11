@@ -1,0 +1,25 @@
+#ifndef JANUS_OUTPUT_H
+#define JANUS_OUTPUT_H
+
+#include <stdbool.h> /* bool */
+#include <stddef.h>  /* size_t */
+
+#include "scanner.h"
+
+#define TIMESTAMP_SIZE 32
+
+/* Everything needed to print the result of one scan. */
+typedef struct {
+    const char *target;         /* as typed by the user */
+    const char *ip_address;     /* resolved IPv4 address */
+    const port_result *results; /* one entry per requested port, sorted */
+    size_t result_count;
+    char started_at[TIMESTAMP_SIZE]; /* UTC, ISO 8601 */
+    double duration_ms;
+    bool interrupted; /* true if the user pressed Ctrl+C */
+} scan_report;
+
+/* Human-readable table of open ports plus a summary line. */
+void print_result_text(const scan_report *report);
+
+#endif /* JANUS_OUTPUT_H */

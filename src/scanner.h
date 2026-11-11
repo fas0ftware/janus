@@ -7,6 +7,7 @@
  */
 
 #include <netinet/in.h> /* struct sockaddr_in, INET_ADDRSTRLEN */
+#include <stddef.h>     /* size_t */
 #include <stdint.h>     /* uint16_t */
 
 /* Possible results of scanning one port. */
@@ -36,6 +37,13 @@ int resolve_target(const char *host, scan_target *target);
 
 /* Scan one port: non-blocking connect that waits at most timeout_ms. */
 port_result scan_port(const scan_target *target, uint16_t port, int timeout_ms);
+
+/*
+ * Scan every port in results[0..count-1] (each .port must be set).
+ * Each entry's state is filled in. Returns 0, or -1 on a setup error.
+ */
+int scan_port_range(const scan_target *target, port_result *results, size_t count,
+                    int timeout_ms, int thread_count);
 
 /* Turn a port_state into a printable word such as "open". */
 const char *port_state_to_string(port_state state);
