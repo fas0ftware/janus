@@ -37,6 +37,18 @@ done
 check "listening port is open" "$HOST:$OPEN_PORT open" "$("$BINARY" "$HOST" "$OPEN_PORT")"
 check "unused port is closed" "$HOST:$CLOSED_PORT closed" "$("$BINARY" "$HOST" "$CLOSED_PORT")"
 
+# Filtered: a listener whose accept queue is full silently drops SYNs.
+FILTERED_PORT=47810
+ready_file="$(mktemp -u)"
+python3 "$(dirname "$0")/filtered_listener.py" "$FILTERED_PORT" "$ready_file" &
+filtered_pid=$!
+trap 'kill "$server_pid" "$filtered_pid" 2>/dev/null || true; rm -f "$ready_file"' EXIT
+for _ in $(seq 30); do
+    [[ -f "$ready_file" ]] && break
+    sleep 0.1
+done
+check "silent port is filtered" "$HOST:$FILTERED_PORT filtered" "$("$BINARY" "$HOST" "$FILTERED_PORT" 300)"
+
 if [[ $failures -gt 0 ]]; then
     echo "$failures test(s) failed"
     exit 1

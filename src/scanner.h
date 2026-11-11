@@ -6,15 +6,36 @@
  * the second copy is skipped, so types are not defined twice.
  */
 
+#include <netinet/in.h> /* struct sockaddr_in, INET_ADDRSTRLEN */
+#include <stdint.h>     /* uint16_t */
+
 /* Possible results of scanning one port. */
 typedef enum {
-    PORT_OPEN,   /* the target completed the TCP handshake (SYN-ACK) */
-    PORT_CLOSED, /* the target answered with RST: "connection refused" */
-    PORT_ERROR   /* something else failed (name lookup, no route, ...) */
+    PORT_NOT_SCANNED, /* scan was stopped before reaching this port */
+    PORT_OPEN,        /* the target completed the TCP handshake (SYN-ACK) */
+    PORT_CLOSED,      /* the target answered with RST: "connection refused" */
+    PORT_FILTERED,    /* no answer before the timeout (likely a firewall) */
+    PORT_ERROR        /* a local error prevented the check */
 } port_state;
 
-/* Try a full TCP connect to host:port and report what happened. Blocking. */
-port_state scan_port(const char *host, int port);
+/* Result for one port. */
+typedef struct {
+    uint16_t port;
+    port_state state;
+    int error_code; /* errno value when state == PORT_ERROR, otherwise 0 */
+} port_result;
+
+/* A resolved target: the binary address plus a printable IP string. */
+typedef struct {
+    struct sockaddr_in address;
+    char ip_text[INET_ADDRSTRLEN];
+} scan_target;
+
+/* Resolve a host name or IPv4 address once, before scanning. Returns 0 on success. */
+int resolve_target(const char *host, scan_target *target);
+
+/* Scan one port: non-blocking connect that waits at most timeout_ms. */
+port_result scan_port(const scan_target *target, uint16_t port, int timeout_ms);
 
 /* Turn a port_state into a printable word such as "open". */
 const char *port_state_to_string(port_state state);

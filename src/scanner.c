@@ -1,73 +1,164 @@
 #include "scanner.h"
 
-#include <errno.h>      /* errno, ECONNREFUSED */
+#include <arpa/inet.h>  /* inet_ntop, htons */
+#include <errno.h>      /* errno, EINPROGRESS, ECONNREFUSED, ... */
+#include <fcntl.h>      /* fcntl, O_NONBLOCK */
 #include <netdb.h>      /* getaddrinfo, freeaddrinfo, gai_strerror */
-#include <stdio.h>      /* snprintf, fprintf */
-#include <string.h>     /* memset, strerror */
-#include <sys/socket.h> /* socket, connect */
+#include <poll.h>       /* poll, struct pollfd */
+#include <string.h>     /* memset, memcpy */
+#include <sys/socket.h> /* socket, connect, getsockopt */
 #include <unistd.h>     /* close */
 
-port_state scan_port(const char *host, int port)
-{
-    /*
-     * getaddrinfo expects the port as text ("8000"), not as a number.
-     * 16 bytes is more than enough for any int, including the sign
-     * and the terminating '\0', so snprintf can never cut it off.
-     */
-    char port_text[16];
-    snprintf(port_text, sizeof port_text, "%d", port);
+#include "utils.h"
 
+int resolve_target(const char *host, scan_target *target)
+{
     /* hints tells getaddrinfo what kind of address we want back. */
     struct addrinfo hints;
     memset(&hints, 0, sizeof hints); /* start with every field zeroed */
-    hints.ai_family = AF_INET;       /* IPv4 only for now */
+    hints.ai_family = AF_INET;       /* IPv4 only */
     hints.ai_socktype = SOCK_STREAM; /* stream socket = TCP */
 
-    /* Turn "localhost" or "127.0.0.1" into a binary socket address. */
-    struct addrinfo *address = NULL;
-    int lookup_result = getaddrinfo(host, port_text, &hints, &address);
+    struct addrinfo *results = NULL;
+    int lookup_result = getaddrinfo(host, NULL, &hints, &results);
     if (lookup_result != 0) {
-        fprintf(stderr, "janus: cannot resolve '%s': %s\n",
-                host, gai_strerror(lookup_result));
+        print_error("cannot resolve '%s': %s", host, gai_strerror(lookup_result));
+        return -1;
+    }
+
+    /* Keep only the first address; copy it so we can free the list right away. */
+    memset(target, 0, sizeof *target);
+    memcpy(&target->address, results->ai_addr, sizeof target->address);
+    freeaddrinfo(results);
+
+    /* Binary address -> "127.0.0.1" for display. */
+    if (inet_ntop(AF_INET, &target->address.sin_addr,
+                  target->ip_text, sizeof target->ip_text) == NULL) {
+        print_error("cannot format address of '%s'", host);
+        return -1;
+    }
+    return 0;
+}
+
+/* Put the socket into non-blocking mode so connect() returns immediately. */
+static int set_non_blocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0); /* read the current flags first ... */
+    if (flags == -1) {
+        return -1;
+    }
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK); /* ... then add one flag */
+}
+
+/* Map a connect error (errno or SO_ERROR value) to a port state. */
+static port_state classify_connect_error(int error_code)
+{
+    switch (error_code) {
+    case 0:
+        return PORT_OPEN;
+    case ECONNREFUSED: /* RST received */
+        return PORT_CLOSED;
+    case ETIMEDOUT:    /* kernel gave up waiting */
+    case EHOSTUNREACH: /* ICMP "host unreachable", often sent by firewalls */
+        return PORT_FILTERED;
+    default:
+        return PORT_ERROR;
+    }
+}
+
+/*
+ * Start a TCP handshake and wait at most timeout_ms for it to finish.
+ * On PORT_ERROR the errno value is stored in *error_code.
+ */
+static port_state connect_with_timeout(const struct sockaddr_in *address,
+                                       int timeout_ms, int *error_code)
+{
+    *error_code = 0;
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == -1) {
+        *error_code = errno;
         return PORT_ERROR;
     }
 
-    /* Ask the kernel for a new TCP socket. We get back a small integer (fd). */
-    int fd = socket(address->ai_family, address->ai_socktype, address->ai_protocol);
-    if (fd == -1) {
-        perror("janus: socket");
-        freeaddrinfo(address); /* do not leak the lookup result on error */
+    if (set_non_blocking(fd) == -1) {
+        *error_code = errno;
+        close(fd);
         return PORT_ERROR;
     }
 
     /*
-     * connect() makes the kernel send a SYN and waits for the answer.
-     * Read errno right away: any later library call may overwrite it.
+     * Non-blocking connect: the kernel sends the SYN and returns at once.
+     * EINPROGRESS means "handshake started, result comes later".
      */
-    port_state state;
-    if (connect(fd, address->ai_addr, address->ai_addrlen) == 0) {
-        state = PORT_OPEN;
-    } else if (errno == ECONNREFUSED) {
-        state = PORT_CLOSED;
-    } else {
-        fprintf(stderr, "janus: connect to %s:%d failed: %s\n",
-                host, port, strerror(errno));
-        state = PORT_ERROR;
+    if (connect(fd, (const struct sockaddr *)address, sizeof *address) == 0) {
+        close(fd); /* connected instantly (can happen on localhost) */
+        return PORT_OPEN;
+    }
+    if (errno != EINPROGRESS) {
+        port_state state = classify_connect_error(errno);
+        if (state == PORT_ERROR) {
+            *error_code = errno;
+        }
+        close(fd);
+        return state;
     }
 
-    /* Always release both resources, whatever the result was. */
+    /*
+     * Wait until the socket becomes writable (handshake finished, either
+     * way) or until the timeout expires. poll returns 0 on timeout.
+     */
+    struct pollfd watch = {.fd = fd, .events = POLLOUT, .revents = 0};
+    int ready = poll(&watch, 1, timeout_ms);
+    if (ready == 0) {
+        close(fd);
+        return PORT_FILTERED; /* silence: no SYN-ACK and no RST */
+    }
+    if (ready == -1) {
+        *error_code = errno; /* includes EINTR when Ctrl+C interrupts poll */
+        close(fd);
+        return PORT_ERROR;
+    }
+
+    /* The socket is "ready", but did the handshake succeed? Ask the kernel. */
+    int socket_error = 0;
+    socklen_t length = sizeof socket_error;
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &length) == -1) {
+        *error_code = errno;
+        close(fd);
+        return PORT_ERROR;
+    }
     close(fd);
-    freeaddrinfo(address);
+
+    port_state state = classify_connect_error(socket_error);
+    if (state == PORT_ERROR) {
+        *error_code = socket_error;
+    }
     return state;
+}
+
+port_result scan_port(const scan_target *target, uint16_t port, int timeout_ms)
+{
+    /* Copy the resolved address and fill in the port for this attempt. */
+    struct sockaddr_in address = target->address;
+    address.sin_port = htons(port); /* host byte order -> network byte order */
+
+    port_result result = {.port = port, .state = PORT_NOT_SCANNED, .error_code = 0};
+    result.state = connect_with_timeout(&address, timeout_ms, &result.error_code);
+    return result;
 }
 
 const char *port_state_to_string(port_state state)
 {
     switch (state) {
+    case PORT_NOT_SCANNED:
+        return "not-scanned";
     case PORT_OPEN:
         return "open";
     case PORT_CLOSED:
         return "closed";
+    case PORT_FILTERED:
+        return "filtered";
     case PORT_ERROR:
         return "error";
     }
