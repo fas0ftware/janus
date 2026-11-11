@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="931" height="388" viewBox="0 0 931 388">
+<rect width="100%" height="100%" rx="10" fill="#0d1117" stroke="#30363d"/>
+<rect width="100%" height="32" rx="10" fill="#161b22"/><rect y="22" width="100%" height="10" fill="#161b22"/>
+<circle cx="18" cy="16" r="6" fill="#ff5f56"/><circle cx="38" cy="16" r="6" fill="#ffbd2e"/><circle cx="58" cy="16" r="6" fill="#27c93f"/>
+<text x="466" y="21" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12" text-anchor="middle">janus — JSON output</text>
+<g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13" xml:space="preserve">
+<text x="14" y="56" fill="#58a6ff">$ ./janus -t localhost -p 2222,8080 --banner --json</text>
+<text x="14" y="74" fill="#e6edf3">{</text>
+<text x="14" y="92" fill="#e6edf3">  &quot;scanner&quot;: &quot;janus&quot;,</text>
+<text x="14" y="110" fill="#e6edf3">  &quot;version&quot;: &quot;1.1.0&quot;,</text>
+<text x="14" y="128" fill="#e6edf3">  &quot;timestamp&quot;: &quot;2026-11-11T19:17:56Z&quot;,</text>
+<text x="14" y="146" fill="#e6edf3">  &quot;target&quot;: &quot;localhost&quot;,</text>
+<text x="14" y="164" fill="#e6edf3">  &quot;ip&quot;: &quot;127.0.0.1&quot;,</text>
+<text x="14" y="182" fill="#e6edf3">  &quot;resolved&quot;: true,</text>
+<text x="14" y="200" fill="#e6edf3">  &quot;duration_ms&quot;: 1,</text>
+<text x="14" y="218" fill="#e6edf3">  &quot;ports_requested&quot;: 2,</text>
+<text x="14" y="236" fill="#e6edf3">  &quot;ports_scanned&quot;: 2,</text>
+<text x="14" y="254" fill="#e6edf3">  &quot;interrupted&quot;: false,</text>
+<text x="14" y="272" fill="#e6edf3">  &quot;open_ports&quot;: [</text>
+<text x="14" y="290" fill="#e6edf3">    {&quot;port&quot;: 2222, &quot;protocol&quot;: &quot;tcp&quot;, &quot;service&quot;: &quot;unknown&quot;, &quot;banner&quot;: &quot;SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu...</text>
+<text x="14" y="308" fill="#3fb950">    {&quot;port&quot;: 8080, &quot;protocol&quot;: &quot;tcp&quot;, &quot;service&quot;: &quot;http-alt&quot;, &quot;banner&quot;: &quot;HTTP/1.0 200 OK&quot;}</text>
+<text x="14" y="326" fill="#e6edf3">  ],</text>
+<text x="14" y="344" fill="#f85149">  &quot;summary&quot;: {&quot;open&quot;: 2, &quot;closed&quot;: 0, &quot;filtered&quot;: 0, &quot;error&quot;: 0, &quot;not_scanned&quot;: 0}</text>
+<text x="14" y="362" fill="#e6edf3">}</text>
+</g></svg>

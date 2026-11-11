@@ -65,7 +65,13 @@ LIB_SOURCES := $(filter-out $(SRC_DIR)/main.c $(SRC_DIR)/output.c,$(SOURCES))
 $(JSON_TEST): tests/test_json_escape.c $(SOURCES) | $(BUILD_DIR)/release
 	$(CC) $(CFLAGS) -I$(SRC_DIR) tests/test_json_escape.c $(LIB_SOURCES) -o $@
 
-test: $(TARGET) $(JSON_TEST)
+# Unit tests for target lists, CIDR expansion and banner sanitizing.
+TARGETS_TEST := $(BUILD_DIR)/test_targets
+$(TARGETS_TEST): tests/test_targets.c $(SOURCES) | $(BUILD_DIR)/release
+	$(CC) $(CFLAGS) -g -fsanitize=address,undefined -I$(SRC_DIR) tests/test_targets.c $(LIB_SOURCES) -o $@
+
+test: $(TARGET) $(JSON_TEST) $(TARGETS_TEST)
+	./$(TARGETS_TEST)
 	JSON_TEST=$(JSON_TEST) ./tests/run_tests.sh
 
 # --- Hardening checks ---------------------------------------------------------
@@ -81,6 +87,8 @@ memcheck: $(TARGET)
 	$(VALGRIND) ./$(TARGET) -t 127.0.0.1 -p 1-2000 --threads 16 > /dev/null
 	$(VALGRIND) ./$(TARGET) -t localhost -p 22,80,443 --json > /dev/null
 	$(VALGRIND) ./$(TARGET) -t 127.0.0.1 -p 0 2> /dev/null; test $$? -eq 2
+	$(VALGRIND) ./$(TARGET) -t 127.0.0.0/28,::1 -p 22,80 --banner --json > /dev/null
+	$(VALGRIND) ./$(TARGET) -t 10.0.0.0/8 2> /dev/null; test $$? -eq 2
 	@echo "valgrind: no leaks or memory errors"
 
 # ThreadSanitizer finds data races between threads. It cannot be combined
@@ -90,6 +98,7 @@ $(TSAN_TARGET): $(SOURCES) | $(BUILD_DIR)/release
 	$(CC) $(CFLAGS) -g -O1 -fsanitize=thread $(SOURCES) -o $@
 tsan: $(TSAN_TARGET)
 	./$(TSAN_TARGET) -t 127.0.0.1 -p 1-3000 --threads 64 > /dev/null
+	./$(TSAN_TARGET) -t 127.0.0.0/29 --top-ports 100 --banner --threads 32 > /dev/null
 	@echo "tsan: no data races reported"
 
 check: test-debug memcheck tsan

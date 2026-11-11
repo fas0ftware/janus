@@ -16,12 +16,15 @@
 
 /* Everything the user asked for on the command line. */
 typedef struct {
-    const char *target; /* points into argv, not owned */
+    const char *target; /* host, list "a,b" or CIDR; points into argv, not owned */
     uint16_t *ports;    /* sorted, no duplicates, heap allocated */
     size_t port_count;
     int timeout_ms;
     int thread_count;
     bool json_output;
+    bool grab_banner; /* --banner */
+    bool open_only;   /* --open: in multi-host scans, hide hosts without open ports */
+    int family;       /* 0 = any, 4 = IPv4 only (-4), 6 = IPv6 only (-6) */
 } scan_options;
 
 typedef enum {

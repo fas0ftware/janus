@@ -8,6 +8,7 @@
 #include <pthread.h>    /* pthread_create, pthread_join, pthread_mutex_* */
 #include <stdatomic.h>  /* atomic_bool, atomic_load, atomic_store */
 #include <stdbool.h>    /* bool */
+#include <stdio.h>      /* snprintf */
 #include <stdlib.h>     /* calloc, free */
 #include <string.h>     /* memset, memcpy, strerror */
 #include <sys/socket.h> /* socket, connect, getsockopt */
@@ -36,12 +37,12 @@ bool scan_stop_requested(void)
     return atomic_load(&stop_requested);
 }
 
-int resolve_target(const char *host, scan_target *target)
+int resolve_target(const char *host, address_family family, scan_target *target)
 {
     /* hints tells getaddrinfo what kind of address we want back. */
     struct addrinfo hints;
     memset(&hints, 0, sizeof hints); /* start with every field zeroed */
-    hints.ai_family = AF_INET;       /* IPv4 only */
+    hints.ai_family = family == FAMILY_IPV4 ? AF_INET : family == FAMILY_IPV6 ? AF_INET6 : AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM; /* stream socket = TCP */
 
     struct addrinfo *results = NULL;
@@ -51,14 +52,36 @@ int resolve_target(const char *host, scan_target *target)
         return -1;
     }
 
-    /* Keep only the first address; copy it so we can free the list right away. */
+    /*
+     * With AF_UNSPEC a name can resolve to both families. Prefer IPv4 (the
+     * common case on home networks), fall back to the first IPv6 address.
+     */
+    const struct addrinfo *chosen = results;
+    for (const struct addrinfo *item = results; item != NULL; item = item->ai_next) {
+        if (item->ai_family == AF_INET) {
+            chosen = item;
+            break;
+        }
+    }
+    if ((chosen->ai_family != AF_INET && chosen->ai_family != AF_INET6) ||
+        chosen->ai_addrlen > sizeof target->address) {
+        print_error("unsupported address for '%s'", host);
+        freeaddrinfo(results);
+        return -1;
+    }
+
+    /* Copy the address so the list can be freed right away. */
     memset(target, 0, sizeof *target);
-    memcpy(&target->address, results->ai_addr, sizeof target->address);
+    memcpy(&target->address, chosen->ai_addr, chosen->ai_addrlen);
+    target->address_length = chosen->ai_addrlen;
+    target->family = chosen->ai_family;
     freeaddrinfo(results);
 
-    /* Binary address -> "127.0.0.1" for display. */
-    if (inet_ntop(AF_INET, &target->address.sin_addr,
-                  target->ip_text, sizeof target->ip_text) == NULL) {
+    /* Binary address -> "127.0.0.1" or "::1" for display. */
+    const void *raw = target->family == AF_INET
+                          ? (const void *)&((const struct sockaddr_in *)&target->address)->sin_addr
+                          : (const void *)&((const struct sockaddr_in6 *)&target->address)->sin6_addr;
+    if (inet_ntop(target->family, raw, target->ip_text, sizeof target->ip_text) == NULL) {
         print_error("cannot format address of '%s'", host);
         return -1;
     }
@@ -95,12 +118,13 @@ static port_state classify_connect_error(int error_code)
  * Start a TCP handshake and wait at most timeout_ms for it to finish.
  * On PORT_ERROR the errno value is stored in *error_code.
  */
-static port_state connect_with_timeout(const struct sockaddr_in *address,
-                                       int timeout_ms, int *error_code)
+static port_state connect_with_timeout(const struct sockaddr *address, socklen_t address_length,
+                                       int timeout_ms, int *error_code, int *open_fd)
 {
     *error_code = 0;
+    *open_fd = -1;
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = socket(address->sa_family, SOCK_STREAM, 0);
     if (fd == -1) {
         *error_code = errno;
         return PORT_ERROR;
@@ -116,8 +140,8 @@ static port_state connect_with_timeout(const struct sockaddr_in *address,
      * Non-blocking connect: the kernel sends the SYN and returns at once.
      * EINPROGRESS means "handshake started, result comes later".
      */
-    if (connect(fd, (const struct sockaddr *)address, sizeof *address) == 0) {
-        close(fd); /* connected instantly (can happen on localhost) */
+    if (connect(fd, address, address_length) == 0) {
+        *open_fd = fd; /* connected instantly (can happen on localhost) */
         return PORT_OPEN;
     }
     if (errno != EINPROGRESS) {
@@ -170,23 +194,127 @@ static port_state connect_with_timeout(const struct sockaddr_in *address,
         close(fd);
         return PORT_ERROR;
     }
-    close(fd);
 
     port_state state = classify_connect_error(socket_error);
     if (state == PORT_ERROR) {
         *error_code = socket_error;
     }
+    if (state == PORT_OPEN) {
+        *open_fd = fd; /* the caller may read a banner, then closes it */
+    } else {
+        close(fd);
+    }
     return state;
 }
 
-port_result scan_port(const scan_target *target, uint16_t port, int timeout_ms)
+void sanitize_banner(const char *raw, size_t raw_length, char *out, size_t out_size)
+{
+    if (out_size == 0) {
+        return;
+    }
+    size_t start = 0;
+    while (start < raw_length && (raw[start] == ' ' || raw[start] == '\r' || raw[start] == '\n' ||
+                                  raw[start] == '\t')) {
+        start++; /* skip leading blank lines */
+    }
+    size_t written = 0;
+    for (size_t i = start; i < raw_length && written + 1 < out_size; i++) {
+        unsigned char c = (unsigned char)raw[i];
+        if (c == '\r' || c == '\n' || c == '\0') {
+            break; /* first line only */
+        }
+        /* Untrusted bytes: never pass terminal escapes or non-ASCII through. */
+        out[written++] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
+    }
+    while (written > 0 && out[written - 1] == ' ') {
+        written--;
+    }
+    out[written] = '\0';
+}
+
+/* Ports where services wait for the client to speak HTTP first. */
+static bool is_http_port(uint16_t port)
+{
+    static const uint16_t http_ports[] = {80, 591, 631, 3000, 5000, 8000, 8008, 8080, 8081, 8888};
+    for (size_t i = 0; i < sizeof http_ports / sizeof http_ports[0]; i++) {
+        if (http_ports[i] == port) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Wait (in stop-aware slices) until fd is readable or the deadline passes. */
+static bool wait_readable(int fd, double deadline_ms)
+{
+    struct pollfd watch = {.fd = fd, .events = POLLIN, .revents = 0};
+    for (;;) {
+        double remaining_ms = deadline_ms - monotonic_time_ms();
+        if (remaining_ms <= 0 || scan_stop_requested()) {
+            return false;
+        }
+        int wait_ms = remaining_ms > POLL_SLICE_MS ? POLL_SLICE_MS : (int)remaining_ms + 1;
+        int ready = poll(&watch, 1, wait_ms);
+        if (ready > 0) {
+            return true;
+        }
+        if (ready == -1 && errno != EINTR) {
+            return false;
+        }
+    }
+}
+
+/*
+ * Many services greet first (SSH, FTP, SMTP, POP3, IMAP, MySQL...). Wait a
+ * moment for that greeting; on common HTTP ports send a minimal HEAD
+ * request instead and keep the status line. Nothing else is ever sent.
+ */
+static void read_banner(int fd, const scan_target *target, uint16_t port, int timeout_ms, char *banner,
+                        size_t banner_size)
+{
+    banner[0] = '\0';
+    int budget_ms = timeout_ms < 1500 ? timeout_ms : 1500;
+    if (is_http_port(port)) {
+        /* Some servers (e.g. CUPS) refuse requests without a Host header. */
+        char probe[128];
+        int length = snprintf(probe, sizeof probe, "HEAD / HTTP/1.0\r\nHost: %s%s%s\r\n\r\n",
+                              target->family == AF_INET6 ? "[" : "", target->ip_text,
+                              target->family == AF_INET6 ? "]" : "");
+        if (length <= 0 || (size_t)length >= sizeof probe ||
+            send(fd, probe, (size_t)length, MSG_NOSIGNAL) != (ssize_t)length) {
+            return;
+        }
+    }
+    if (!wait_readable(fd, monotonic_time_ms() + budget_ms)) {
+        return;
+    }
+    char raw[512];
+    ssize_t received = recv(fd, raw, sizeof raw, 0);
+    if (received > 0) {
+        sanitize_banner(raw, (size_t)received, banner, banner_size);
+    }
+}
+
+port_result scan_port(const scan_target *target, uint16_t port, const scan_settings *settings)
 {
     /* Copy the resolved address and fill in the port for this attempt. */
-    struct sockaddr_in address = target->address;
-    address.sin_port = htons(port); /* host byte order -> network byte order */
+    struct sockaddr_storage address = target->address;
+    if (target->family == AF_INET) {
+        ((struct sockaddr_in *)&address)->sin_port = htons(port); /* host -> network byte order */
+    } else {
+        ((struct sockaddr_in6 *)&address)->sin6_port = htons(port);
+    }
 
-    port_result result = {.port = port, .state = PORT_NOT_SCANNED, .error_code = 0};
-    result.state = connect_with_timeout(&address, timeout_ms, &result.error_code);
+    port_result result = {.port = port, .state = PORT_NOT_SCANNED, .error_code = 0, .banner = ""};
+    int open_fd = -1;
+    result.state = connect_with_timeout((const struct sockaddr *)&address, target->address_length,
+                                        settings->timeout_ms, &result.error_code, &open_fd);
+    if (open_fd != -1) {
+        if (settings->grab_banner) {
+            read_banner(open_fd, target, port, settings->timeout_ms, result.banner, sizeof result.banner);
+        }
+        close(open_fd);
+    }
     return result;
 }
 
@@ -199,7 +327,7 @@ typedef struct {
     const scan_target *target;
     port_result *results; /* each worker writes only the slots it claimed */
     size_t count;
-    int timeout_ms;
+    const scan_settings *settings;
     size_t next_index; /* protected by lock */
     pthread_mutex_t lock;
 } work_queue;
@@ -235,13 +363,13 @@ static void *scan_worker(void *argument)
     while (take_next_index(queue, &index)) {
         /* No lock needed here: no other thread ever gets this same index. */
         queue->results[index] = scan_port(queue->target, queue->results[index].port,
-                                          queue->timeout_ms);
+                                          queue->settings);
     }
     return NULL;
 }
 
 int scan_port_range(const scan_target *target, port_result *results, size_t count,
-                    int timeout_ms, int thread_count)
+                    const scan_settings *settings)
 {
     if (count == 0) {
         return 0;
@@ -251,7 +379,7 @@ int scan_port_range(const scan_target *target, port_result *results, size_t coun
         .target = target,
         .results = results,
         .count = count,
-        .timeout_ms = timeout_ms,
+        .settings = settings,
         .next_index = 0,
     };
     if (pthread_mutex_init(&queue.lock, NULL) != 0) {
@@ -260,7 +388,7 @@ int scan_port_range(const scan_target *target, port_result *results, size_t coun
     }
 
     /* More threads than ports would only sit idle. */
-    size_t wanted = (size_t)thread_count < count ? (size_t)thread_count : count;
+    size_t wanted = (size_t)settings->thread_count < count ? (size_t)settings->thread_count : count;
     pthread_t *threads = calloc(wanted, sizeof *threads);
     if (threads == NULL) {
         print_error("out of memory");

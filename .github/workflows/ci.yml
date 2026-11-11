@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y valgrind cppcheck
+      - name: Build with warnings as errors
+        run: make CC=${{ matrix.cc }} CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -D_POSIX_C_SOURCE=200809L -pthread"
+      - name: Unit and end-to-end tests
+        run: make CC=${{ matrix.cc }} test
+      - name: Sanitizers, valgrind, ThreadSanitizer
+        run: make CC=${{ matrix.cc }} check
+      - name: Static analysis (cppcheck)
+        run: cppcheck -q --enable=warning,portability,performance --std=c11 --error-exitcode=1 -I src src/

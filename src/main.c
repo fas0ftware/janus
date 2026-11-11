@@ -15,6 +15,7 @@
 #include "output.h"
 #include "scanner.h"
 #include "services.h"
+#include "targets.h"
 #include "utils.h"
 
 /* Exit codes, documented in the README. */
@@ -53,6 +54,46 @@ static int install_signal_handlers(void)
     return 0;
 }
 
+/* One host: resolve, scan, fill *report. *target_out keeps the IP text alive. */
+static int scan_one_host(const char *host, const scan_options *options, const scan_settings *settings,
+                         scan_target *target_out, port_result *results, scan_report *report)
+{
+    for (size_t i = 0; i < options->port_count; i++) {
+        memset(&results[i], 0, sizeof results[i]);
+        results[i].port = options->ports[i];
+        results[i].state = PORT_NOT_SCANNED;
+    }
+    *report = (scan_report){
+        .target = host,
+        .ip_address = "",
+        .results = results,
+        .result_count = options->port_count,
+        .started_at = "",
+        .duration_ms = 0.0,
+        .interrupted = false,
+        .show_banner = options->grab_banner,
+        .resolved = false,
+    };
+    if (format_utc_timestamp(report->started_at, sizeof report->started_at) != 0) {
+        report->started_at[0] = '\0';
+    }
+
+    address_family family = options->family == 4 ? FAMILY_IPV4 : options->family == 6 ? FAMILY_IPV6 : FAMILY_ANY;
+    if (resolve_target(host, family, target_out) != 0) {
+        return -1;
+    }
+    report->ip_address = target_out->ip_text;
+    report->resolved = true;
+
+    double start_ms = monotonic_time_ms();
+    if (scan_port_range(target_out, results, options->port_count, settings) != 0) {
+        return -2;
+    }
+    report->duration_ms = monotonic_time_ms() - start_ms;
+    report->interrupted = scan_stop_requested();
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     scan_options options;
@@ -66,56 +107,79 @@ int main(int argc, char *argv[])
     }
 
     int exit_code = EXIT_SUCCESS;
+    target_list targets = {NULL, 0};
+    scan_target *resolved = NULL;
     port_result *results = NULL;
+    scan_report *reports = NULL;
 
+    if (expand_targets(options.target, &targets) != 0) {
+        free_options(&options);
+        return EXIT_USAGE_ERROR;
+    }
     if (install_signal_handlers() != 0) {
         exit_code = EXIT_SCAN_ERROR;
         goto cleanup;
     }
 
-    scan_target target;
-    if (resolve_target(options.target, &target) != 0) {
-        exit_code = EXIT_SCAN_ERROR;
-        goto cleanup; /* one shared exit path that frees everything */
-    }
-
-    results = calloc(options.port_count, sizeof *results);
-    if (results == NULL) {
-        print_error("out of memory");
+    /* One results block per host: count * ports entries, allocated once. */
+    resolved = calloc(targets.count, sizeof *resolved);
+    results = calloc(targets.count * options.port_count, sizeof *results);
+    reports = calloc(targets.count, sizeof *reports);
+    if (resolved == NULL || results == NULL || reports == NULL) {
+        print_error("out of memory (%zu hosts x %zu ports)", targets.count, options.port_count);
         exit_code = EXIT_SCAN_ERROR;
         goto cleanup;
     }
-    for (size_t i = 0; i < options.port_count; i++) {
-        results[i].port = options.ports[i];
-        results[i].state = PORT_NOT_SCANNED;
-    }
 
-    scan_report report = {
-        .target = options.target,
-        .ip_address = target.ip_text,
-        .results = results,
-        .result_count = options.port_count,
-        .started_at = "",
-        .duration_ms = 0.0,
-        .interrupted = false,
+    scan_settings settings = {
+        .timeout_ms = options.timeout_ms,
+        .thread_count = options.thread_count,
+        .grab_banner = options.grab_banner,
     };
-    if (format_utc_timestamp(report.started_at, sizeof report.started_at) != 0) {
-        report.started_at[0] = '\0';
+    char started_at[TIMESTAMP_SIZE] = "";
+    if (format_utc_timestamp(started_at, sizeof started_at) != 0) {
+        started_at[0] = '\0';
     }
 
     double start_ms = monotonic_time_ms();
-    if (scan_port_range(&target, results, options.port_count,
-                        options.timeout_ms, options.thread_count) != 0) {
-        exit_code = EXIT_SCAN_ERROR;
-        goto cleanup;
+    size_t scanned_hosts = 0;
+    bool any_resolved = false;
+    for (size_t h = 0; h < targets.count && !scan_stop_requested(); h++) {
+        int result = scan_one_host(targets.hosts[h], &options, &settings, &resolved[h],
+                                   results + h * options.port_count, &reports[h]);
+        scanned_hosts++;
+        if (result == -2) {
+            exit_code = EXIT_SCAN_ERROR;
+            goto cleanup;
+        }
+        any_resolved |= result == 0;
     }
-    report.duration_ms = monotonic_time_ms() - start_ms;
-    report.interrupted = scan_stop_requested();
+    double duration_ms = monotonic_time_ms() - start_ms;
+    bool interrupted = scan_stop_requested();
 
-    if (options.json_output) {
-        print_result_json(&report);
+    if (targets.count == 1) {
+        if (!reports[0].resolved) {
+            exit_code = EXIT_SCAN_ERROR; /* the error was already printed */
+            goto cleanup;
+        }
+        if (options.json_output) {
+            print_result_json(&reports[0]);
+        } else {
+            print_result_text(&reports[0]);
+        }
     } else {
-        print_result_text(&report);
+        if (options.json_output) {
+            print_multi_json(reports, scanned_hosts, options.target, started_at, duration_ms);
+        } else {
+            print_multi_text(reports, scanned_hosts, options.open_only, duration_ms);
+        }
+        if (!any_resolved) {
+            exit_code = EXIT_SCAN_ERROR;
+        }
+        if (interrupted) {
+            print_error("scan interrupted after %zu of %zu host(s), results are partial", scanned_hosts,
+                        targets.count);
+        }
     }
 
     /*
@@ -125,13 +189,16 @@ int main(int argc, char *argv[])
     if (fflush(stdout) != 0 || ferror(stdout)) {
         print_error("cannot write output: %s", strerror(errno));
         exit_code = EXIT_SCAN_ERROR;
-    } else if (report.interrupted) {
+    } else if (interrupted) {
         exit_code = EXIT_INTERRUPTED;
     }
 
 cleanup:
     close_service_database();
+    free(reports);
     free(results);
+    free(resolved);
+    free_targets(&targets);
     free_options(&options);
     return exit_code;
 }

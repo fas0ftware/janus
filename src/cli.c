@@ -6,6 +6,7 @@
 #include <stdlib.h> /* calloc, free, strtol */
 #include <string.h> /* strchr, strlen */
 
+#include "targets.h"
 #include "utils.h"
 
 #define PORT_MIN 1
@@ -17,6 +18,9 @@ enum {
     OPTION_TIMEOUT = 1000,
     OPTION_THREADS,
     OPTION_JSON,
+    OPTION_TOP_PORTS,
+    OPTION_BANNER,
+    OPTION_OPEN,
 };
 
 void print_usage(FILE *stream, const char *program_name)
@@ -27,17 +31,23 @@ void print_usage(FILE *stream, const char *program_name)
             "Usage: %s -t <target> [options]\n"
             "\n"
             "Options:\n"
-            "  -t, --target <host>   host name or IPv4 address to scan (required)\n"
+            "  -t, --target <spec>   host name, IPv4/IPv6 address, list (a,b,c) or IPv4\n"
+            "                        CIDR block /%d-/32, e.g. 192.168.1.0/24 (required)\n"
             "  -p, --ports <list>    ports: 80 | 22,80,443 | 1-1024 | 22,80-90 (default %s)\n"
+            "      --top-ports <n>   the n most common ports, 1-%d (instead of -p)\n"
             "      --timeout <ms>    wait per port in milliseconds, %d-%d (default %d)\n"
             "      --threads <n>     parallel workers, 1-%d (default %d)\n"
+            "      --banner          read a short greeting from open ports (HTTP ports\n"
+            "                        get a HEAD request); nothing else is sent\n"
+            "      --open            with several hosts, list only hosts with open ports\n"
+            "  -4 / -6               use only IPv4 / only IPv6 when resolving names\n"
             "      --json            print the result as JSON (open ports only)\n"
             "  -h, --help            show this help and exit\n"
             "  -v, --version         show the version and exit\n"
             "\n"
             "WARNING: Authorized use only. Scan only systems you own or have\n"
             "explicit permission to test. Unauthorized scanning may be illegal.\n",
-            JANUS_VERSION, program_name, DEFAULT_PORTS,
+            JANUS_VERSION, program_name, MIN_CIDR_PREFIX, DEFAULT_PORTS, TOP_PORTS_MAX,
             MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, DEFAULT_TIMEOUT_MS,
             MAX_THREAD_COUNT, DEFAULT_THREAD_COUNT);
 }
@@ -192,6 +202,8 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
 {
     const char *program_name = argv[0];
     const char *port_text = DEFAULT_PORTS;
+    bool ports_given = false;
+    int top_count = 0;
 
     options->target = NULL;
     options->ports = NULL;
@@ -199,6 +211,9 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
     options->timeout_ms = DEFAULT_TIMEOUT_MS;
     options->thread_count = DEFAULT_THREAD_COUNT;
     options->json_output = false;
+    options->grab_banner = false;
+    options->open_only = false;
+    options->family = 0;
 
     static const struct option long_options[] = {
         {"target", required_argument, NULL, 't'},
@@ -206,6 +221,9 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
         {"timeout", required_argument, NULL, OPTION_TIMEOUT},
         {"threads", required_argument, NULL, OPTION_THREADS},
         {"json", no_argument, NULL, OPTION_JSON},
+        {"top-ports", required_argument, NULL, OPTION_TOP_PORTS},
+        {"banner", no_argument, NULL, OPTION_BANNER},
+        {"open", no_argument, NULL, OPTION_OPEN},
         {"help", no_argument, NULL, 'h'},
         {"version", no_argument, NULL, 'v'},
         {NULL, 0, NULL, 0}, /* end marker */
@@ -213,13 +231,34 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
 
     /* Leading ':' lets us print our own message for a missing argument. */
     int option;
-    while ((option = getopt_long(argc, argv, ":t:p:hv", long_options, NULL)) != -1) {
+    while ((option = getopt_long(argc, argv, ":t:p:hv46", long_options, NULL)) != -1) {
         switch (option) {
         case 't':
             options->target = optarg;
             break;
         case 'p':
             port_text = optarg;
+            ports_given = true;
+            break;
+        case OPTION_TOP_PORTS:
+            if (parse_bounded_int(optarg, 1, TOP_PORTS_MAX, &top_count) != 0) {
+                print_error("invalid --top-ports '%s' (expected 1-%d)", optarg, TOP_PORTS_MAX);
+                return PARSE_ERROR;
+            }
+            break;
+        case OPTION_BANNER:
+            options->grab_banner = true;
+            break;
+        case OPTION_OPEN:
+            options->open_only = true;
+            break;
+        case '4':
+        case '6':
+            if (options->family != 0 && options->family != option - '0') {
+                print_error("-4 and -6 cannot be combined");
+                return PARSE_ERROR;
+            }
+            options->family = option - '0';
             break;
         case OPTION_TIMEOUT:
             if (parse_bounded_int(optarg, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS,
@@ -264,11 +303,26 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
         return PARSE_ERROR;
     }
     size_t target_length = strlen(options->target);
-    if (target_length == 0 || target_length > MAX_TARGET_LENGTH) {
-        print_error("target must be 1-%d characters long", MAX_TARGET_LENGTH);
+    if (target_length == 0 || target_length > 4096) {
+        print_error("target must be 1-4096 characters long");
         return PARSE_ERROR;
     }
 
+    if (ports_given && top_count > 0) {
+        print_error("use either -p or --top-ports, not both");
+        return PARSE_ERROR;
+    }
+    if (top_count > 0) {
+        /* Reuse the list parser's sort and de-duplication through a text list. */
+        char list[TOP_PORTS_MAX * 7];
+        size_t used = 0;
+        for (int i = 0; i < top_count; i++) {
+            used += (size_t)snprintf(list + used, sizeof list - used, "%s%u", i ? "," : "",
+                                     (unsigned)top_ports[i]);
+        }
+        return parse_port_list(list, &options->ports, &options->port_count) == 0 ? PARSE_OK
+                                                                                 : PARSE_ERROR;
+    }
     if (parse_port_list(port_text, &options->ports, &options->port_count) != 0) {
         return PARSE_ERROR;
     }

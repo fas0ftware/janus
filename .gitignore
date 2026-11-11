@@ -19,3 +19,7 @@ core
 JANUS-REHBER.md
 test.md
 test-gorselleri/
+
+# Personal scan results of real networks (never commit)
+tarama/
+*.scan.txt
