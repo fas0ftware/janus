@@ -5,7 +5,10 @@
 #include <fcntl.h>      /* fcntl, O_NONBLOCK */
 #include <netdb.h>      /* getaddrinfo, freeaddrinfo, gai_strerror */
 #include <poll.h>       /* poll, struct pollfd */
-#include <string.h>     /* memset, memcpy */
+#include <pthread.h>    /* pthread_create, pthread_join, pthread_mutex_* */
+#include <stdbool.h>    /* bool */
+#include <stdlib.h>     /* calloc, free */
+#include <string.h>     /* memset, memcpy, strerror */
 #include <sys/socket.h> /* socket, connect, getsockopt */
 #include <unistd.h>     /* close */
 
@@ -148,13 +151,102 @@ port_result scan_port(const scan_target *target, uint16_t port, int timeout_ms)
     return result;
 }
 
+/*
+ * Shared work queue. All workers read from the same list of ports;
+ * next_index says which port is handed out next. Several threads touch
+ * next_index, so it is only read or changed while holding 'lock'.
+ */
+typedef struct {
+    const scan_target *target;
+    port_result *results; /* each worker writes only the slots it claimed */
+    size_t count;
+    int timeout_ms;
+    size_t next_index; /* protected by lock */
+    pthread_mutex_t lock;
+} work_queue;
+
+/* Hand out the next unscanned index. Returns false when the work is done. */
+static bool take_next_index(work_queue *queue, size_t *index_out)
+{
+    bool has_work = false;
+
+    pthread_mutex_lock(&queue->lock);
+    /* Only one thread at a time can be between lock and unlock. */
+    if (queue->next_index < queue->count) {
+        *index_out = queue->next_index;
+        queue->next_index++;
+        has_work = true;
+    }
+    pthread_mutex_unlock(&queue->lock);
+
+    return has_work;
+}
+
+/* Thread body: keep taking ports from the queue until it is empty. */
+static void *scan_worker(void *argument)
+{
+    work_queue *queue = argument;
+    size_t index;
+
+    while (take_next_index(queue, &index)) {
+        /* No lock needed here: no other thread ever gets this same index. */
+        queue->results[index] = scan_port(queue->target, queue->results[index].port,
+                                          queue->timeout_ms);
+    }
+    return NULL;
+}
+
 int scan_port_range(const scan_target *target, port_result *results, size_t count,
                     int timeout_ms, int thread_count)
 {
-    (void)thread_count; /* sequential for now; Milestone 6 adds threads */
-    for (size_t i = 0; i < count; i++) {
-        results[i] = scan_port(target, results[i].port, timeout_ms);
+    if (count == 0) {
+        return 0;
     }
+
+    work_queue queue = {
+        .target = target,
+        .results = results,
+        .count = count,
+        .timeout_ms = timeout_ms,
+        .next_index = 0,
+    };
+    if (pthread_mutex_init(&queue.lock, NULL) != 0) {
+        print_error("cannot create mutex");
+        return -1;
+    }
+
+    /* More threads than ports would only sit idle. */
+    size_t wanted = (size_t)thread_count < count ? (size_t)thread_count : count;
+    pthread_t *threads = calloc(wanted, sizeof *threads);
+    if (threads == NULL) {
+        print_error("out of memory");
+        pthread_mutex_destroy(&queue.lock);
+        return -1;
+    }
+
+    size_t started = 0;
+    for (size_t i = 0; i < wanted; i++) {
+        int error = pthread_create(&threads[i], NULL, scan_worker, &queue);
+        if (error != 0) {
+            /* Not fatal: the threads already running will share the work. */
+            print_error("could only start %zu of %zu threads: %s",
+                        started, wanted, strerror(error));
+            break;
+        }
+        started++;
+    }
+
+    if (started == 0) {
+        scan_worker(&queue); /* no threads at all: do the work ourselves */
+    }
+
+    /* Wait for every worker to finish before the results are read. */
+    for (size_t i = 0; i < started; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    free(threads);
+    pthread_mutex_destroy(&queue.lock);
     return 0;
 }
 

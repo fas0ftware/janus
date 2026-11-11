@@ -89,6 +89,15 @@ expect_output "list and range are combined without duplicates" "3 port\(s\).*1 o
     "$BINARY" -t "$HOST" -p "$CLOSED_PORT,$OPEN_PORT-$((OPEN_PORT + 2)),$OPEN_PORT"
 expect_output "host names are resolved" "\($HOST\)" "$BINARY" -t localhost -p "$OPEN_PORT"
 
+# ---- threads ----------------------------------------------------------------
+range="$((OPEN_PORT - 20))-$((OPEN_PORT + 9))" # 30 ports, one of them open
+expect_output "1 thread scans the range" "30 port\(s\).*1 open, 29 closed" \
+    "$BINARY" -t "$HOST" -p "$range" --threads 1
+expect_output "8 threads give the same result" "30 port\(s\).*1 open, 29 closed" \
+    "$BINARY" -t "$HOST" -p "$range" --threads 8
+expect_output "more threads than ports is fine" "^$OPEN_PORT/tcp +open" \
+    "$BINARY" -t "$HOST" -p "$OPEN_PORT" --threads 256
+
 # ---- JSON output ------------------------------------------------------------
 json_output="$("$BINARY" -t localhost -p "$CLOSED_PORT,$OPEN_PORT" --json 2>/dev/null)"
 if python3 -c '

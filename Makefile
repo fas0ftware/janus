@@ -7,7 +7,8 @@
 #   make clean   remove all build output
 
 CC      := gcc
-CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -D_POSIX_C_SOURCE=200809L
+# -pthread enables POSIX threads for both compiling and linking.
+CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -D_POSIX_C_SOURCE=200809L -pthread
 
 # Release build: optimized, no debug info.
 RELEASE_FLAGS := -O2
