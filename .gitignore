@@ -15,5 +15,7 @@ core
 *.swp
 *~
 
-# Personal Turkish learning guide (not part of the project)
+# Personal Turkish notes: learning guide and test report (not part of the project)
 JANUS-REHBER.md
+test.md
+test-gorselleri/
