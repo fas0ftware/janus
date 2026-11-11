@@ -1,7 +1,8 @@
 #include "output.h"
 
-#include <stdio.h>  /* printf, fprintf */
-#include <string.h> /* strerror */
+#include <stdbool.h> /* bool */
+#include <stdio.h>   /* printf, putchar, fputs */
+#include <string.h>  /* strerror */
 
 #include "services.h"
 #include "utils.h"
@@ -91,6 +92,92 @@ void print_result_text(const scan_report *report)
         printf(", %zu not scanned", counts.not_scanned);
     }
     printf("\n");
+
+    print_warnings(report, &counts);
+}
+
+/*
+ * Print a string as a JSON string literal, including the quotes.
+ * JSON forbids raw control characters inside strings and gives '"' and
+ * '\\' a special meaning, so those must be escaped. Bytes >= 0x80 are
+ * copied unchanged (they are part of UTF-8 characters).
+ */
+static void print_json_string(const char *text)
+{
+    putchar('"');
+    for (const unsigned char *cursor = (const unsigned char *)text; *cursor != '\0'; cursor++) {
+        unsigned char c = *cursor;
+        switch (c) {
+        case '"':
+            fputs("\\\"", stdout);
+            break;
+        case '\\':
+            fputs("\\\\", stdout);
+            break;
+        case '\n':
+            fputs("\\n", stdout);
+            break;
+        case '\r':
+            fputs("\\r", stdout);
+            break;
+        case '\t':
+            fputs("\\t", stdout);
+            break;
+        case '\b':
+            fputs("\\b", stdout);
+            break;
+        case '\f':
+            fputs("\\f", stdout);
+            break;
+        default:
+            if (c < 0x20) {
+                printf("\\u%04x", (unsigned)c); /* other control characters */
+            } else {
+                putchar(c);
+            }
+        }
+    }
+    putchar('"');
+}
+
+void print_result_json(const scan_report *report)
+{
+    state_counts counts = count_states(report);
+
+    printf("{\n");
+    printf("  \"scanner\": \"janus\",\n");
+    printf("  \"version\": \"%s\",\n", JANUS_VERSION);
+    printf("  \"target\": ");
+    print_json_string(report->target);
+    printf(",\n  \"ip\": ");
+    print_json_string(report->ip_address);
+    printf(",\n  \"timestamp\": ");
+    print_json_string(report->started_at);
+    /* Whole milliseconds: integers are simpler for other programs to read. */
+    printf(",\n  \"duration_ms\": %.0f,\n", report->duration_ms);
+    printf("  \"ports_scanned\": %zu,\n", report->result_count);
+    printf("  \"interrupted\": %s,\n", report->interrupted ? "true" : "false");
+
+    printf("  \"open_ports\": [");
+    bool first = true;
+    for (size_t i = 0; i < report->result_count; i++) {
+        const port_result *result = &report->results[i];
+        if (result->state != PORT_OPEN) {
+            continue;
+        }
+        /* JSON does not allow a trailing comma, so print it before each item but the first. */
+        printf("%s\n    {\"port\": %u, \"protocol\": \"tcp\", \"service\": ",
+               first ? "" : ",", (unsigned)result->port);
+        print_json_string(lookup_service_name(result->port));
+        printf("}");
+        first = false;
+    }
+    printf("%s],\n", first ? "" : "\n  ");
+
+    printf("  \"summary\": {\"open\": %zu, \"closed\": %zu, \"filtered\": %zu, "
+           "\"error\": %zu, \"not_scanned\": %zu}\n",
+           counts.open, counts.closed, counts.filtered, counts.error, counts.not_scanned);
+    printf("}\n");
 
     print_warnings(report, &counts);
 }

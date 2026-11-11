@@ -22,4 +22,10 @@ typedef struct {
 /* Human-readable table of open ports plus a summary line. */
 void print_result_text(const scan_report *report);
 
+/*
+ * Machine-readable JSON (open ports only, plus metadata and counts),
+ * meant to be read by other programs such as network-monitor.
+ */
+void print_result_json(const scan_report *report);
+
 #endif /* JANUS_OUTPUT_H */

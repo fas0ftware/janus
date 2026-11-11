@@ -56,8 +56,15 @@ $(BUILD_DIR)/debug/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)/debug
 $(BUILD_DIR)/release $(BUILD_DIR)/debug:
 	mkdir -p $@
 
-test: $(TARGET)
-	./tests/run_tests.sh
+# Small C helper that unit-tests the JSON escaping in output.c.
+JSON_TEST := $(BUILD_DIR)/test_json_escape
+LIB_SOURCES := $(filter-out $(SRC_DIR)/main.c $(SRC_DIR)/output.c,$(SOURCES))
+
+$(JSON_TEST): tests/test_json_escape.c $(SOURCES) | $(BUILD_DIR)/release
+	$(CC) $(CFLAGS) -I$(SRC_DIR) tests/test_json_escape.c $(LIB_SOURCES) -o $@
+
+test: $(TARGET) $(JSON_TEST)
+	JSON_TEST=$(JSON_TEST) ./tests/run_tests.sh
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET) $(DEBUG_TARGET)

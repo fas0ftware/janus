@@ -89,6 +89,54 @@ expect_output "list and range are combined without duplicates" "3 port\(s\).*1 o
     "$BINARY" -t "$HOST" -p "$CLOSED_PORT,$OPEN_PORT-$((OPEN_PORT + 2)),$OPEN_PORT"
 expect_output "host names are resolved" "\($HOST\)" "$BINARY" -t localhost -p "$OPEN_PORT"
 
+# ---- JSON output ------------------------------------------------------------
+json_output="$("$BINARY" -t localhost -p "$CLOSED_PORT,$OPEN_PORT" --json 2>/dev/null)"
+if python3 -c '
+import json, sys
+data = json.loads(sys.argv[1])
+assert data["scanner"] == "janus", data
+assert data["target"] == "localhost" and data["ip"] == "127.0.0.1", data
+assert [p["port"] for p in data["open_ports"]] == [int(sys.argv[2])], data
+assert data["open_ports"][0]["protocol"] == "tcp", data
+assert data["ports_scanned"] == 2 and data["summary"]["closed"] == 1, data
+assert isinstance(data["duration_ms"], int) and data["interrupted"] is False, data
+assert data["timestamp"].endswith("Z"), data
+' "$json_output" "$OPEN_PORT"; then
+    pass "JSON output is valid and complete"
+else
+    fail "JSON output is valid and complete"
+    sed 's/^/    | /' <<<"$json_output"
+fi
+
+no_open_json="$("$BINARY" -t "$HOST" -p "$CLOSED_PORT" --json 2>/dev/null)"
+if python3 -c 'import json,sys; assert json.loads(sys.argv[1])["open_ports"] == []' "$no_open_json"; then
+    pass "JSON with no open ports is valid"
+else
+    fail "JSON with no open ports is valid"
+fi
+
+if [[ -n "${JSON_TEST:-}" ]]; then
+    if "$JSON_TEST" | python3 -c '
+import json, sys
+expected = [
+    "plain",
+    "quote \" inside",
+    "back\\slash",
+    "new\nline and tab\t and cr\r",
+    "bell \a and escape \x1b and unit separator \x1f",
+    "backspace \b and form feed \f",
+    "utf-8: \u011f\u00fc\u015f",
+    "",
+]
+actual = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+assert actual == expected, actual
+'; then
+        pass "JSON string escaping round-trips"
+    else
+        fail "JSON string escaping round-trips"
+    fi
+fi
+
 # ---- summary ----------------------------------------------------------------
 echo
 echo "$passed passed, $failed failed"

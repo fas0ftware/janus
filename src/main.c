@@ -70,7 +70,11 @@ int main(int argc, char *argv[])
     }
     report.duration_ms = monotonic_time_ms() - start_ms;
 
-    print_result_text(&report);
+    if (options.json_output) {
+        print_result_json(&report);
+    } else {
+        print_result_text(&report);
+    }
 
 cleanup:
     close_service_database();
