@@ -14,3 +14,6 @@ core
 .idea/
 *.swp
 *~
+
+# Personal Turkish learning guide (not part of the project)
+JANUS-REHBER.md
