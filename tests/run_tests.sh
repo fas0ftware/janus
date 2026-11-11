@@ -8,9 +8,13 @@ set -uo pipefail
 BINARY="${JANUS_BINARY:-./janus}"
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 HOST="127.0.0.1"
-OPEN_PORT=47800     # http.server listens here
-CLOSED_PORT=47801   # nothing listens here
-FILTERED_PORT=47810 # full accept queue: SYNs are silently dropped
+# Test ports stay below Linux's ephemeral range (32768-60999 by default).
+# Ports in that range are also used as source ports for outgoing
+# connections, so a recent full scan can leave one in TIME_WAIT and make
+# binding a test listener fail with "Address already in use".
+OPEN_PORT=29800     # http.server listens here
+CLOSED_PORT=29801   # nothing listens here
+FILTERED_PORT=29810 # full accept queue: SYNs are silently dropped
 passed=0
 failed=0
 
@@ -84,7 +88,7 @@ expect_output "closed port is counted" "1 port\(s\).*0 open, 1 closed" \
     "$BINARY" -t "$HOST" -p "$CLOSED_PORT"
 expect_output "silent port is filtered" "0 open, 0 closed, 1 filtered" \
     "$BINARY" -t "$HOST" -p "$FILTERED_PORT" --timeout 300
-# 47801 + 47800-47802 + 47800 -> duplicates removed -> 3 unique ports
+# 29801 + 29800-29802 + 29800 -> duplicates removed -> 3 unique ports
 expect_output "list and range are combined without duplicates" "3 port\(s\).*1 open, 2 closed" \
     "$BINARY" -t "$HOST" -p "$CLOSED_PORT,$OPEN_PORT-$((OPEN_PORT + 2)),$OPEN_PORT"
 expect_output "host names are resolved" "\($HOST\)" "$BINARY" -t localhost -p "$OPEN_PORT"
