@@ -5,7 +5,11 @@
  * or have explicit permission to test.
  */
 
+#include <errno.h>  /* errno */
+#include <signal.h> /* sigaction, SIGINT, SIGTERM */
+#include <stdio.h>  /* fflush, ferror, stdout */
 #include <stdlib.h> /* calloc, free, EXIT_SUCCESS */
+#include <string.h> /* memset, strerror */
 
 #include "cli.h"
 #include "output.h"
@@ -16,6 +20,38 @@
 /* Exit codes, documented in the README. */
 #define EXIT_SCAN_ERROR 1  /* runtime problem, e.g. the host cannot be resolved */
 #define EXIT_USAGE_ERROR 2 /* invalid command-line input */
+#define EXIT_INTERRUPTED 130 /* shell convention: 128 + SIGINT (2) */
+
+/*
+ * Runs when the user presses Ctrl+C (SIGINT) or the process gets SIGTERM.
+ * A signal handler may interrupt the program anywhere, even inside printf
+ * or malloc, so it must only do async-signal-safe work: here it just sets
+ * an atomic flag. The scan loop sees the flag and stops cleanly.
+ */
+static void handle_stop_signal(int signal_number)
+{
+    (void)signal_number;
+    request_scan_stop();
+}
+
+static int install_signal_handlers(void)
+{
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_handler = handle_stop_signal;
+    sigemptyset(&action.sa_mask);
+    /*
+     * SA_RESETHAND: after the first signal the default action comes back,
+     * so a second Ctrl+C kills Janus immediately if a clean stop hangs.
+     */
+    action.sa_flags = SA_RESETHAND;
+
+    if (sigaction(SIGINT, &action, NULL) != 0 || sigaction(SIGTERM, &action, NULL) != 0) {
+        print_error("cannot install signal handler: %s", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
 
 int main(int argc, char *argv[])
 {
@@ -31,6 +67,11 @@ int main(int argc, char *argv[])
 
     int exit_code = EXIT_SUCCESS;
     port_result *results = NULL;
+
+    if (install_signal_handlers() != 0) {
+        exit_code = EXIT_SCAN_ERROR;
+        goto cleanup;
+    }
 
     scan_target target;
     if (resolve_target(options.target, &target) != 0) {
@@ -69,11 +110,23 @@ int main(int argc, char *argv[])
         goto cleanup;
     }
     report.duration_ms = monotonic_time_ms() - start_ms;
+    report.interrupted = scan_stop_requested();
 
     if (options.json_output) {
         print_result_json(&report);
     } else {
         print_result_text(&report);
+    }
+
+    /*
+     * printf only fills a buffer; a full disk or a closed pipe shows up
+     * when the buffer is flushed. Check it so failures are not silent.
+     */
+    if (fflush(stdout) != 0 || ferror(stdout)) {
+        print_error("cannot write output: %s", strerror(errno));
+        exit_code = EXIT_SCAN_ERROR;
+    } else if (report.interrupted) {
+        exit_code = EXIT_INTERRUPTED;
     }
 
 cleanup:

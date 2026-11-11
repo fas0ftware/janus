@@ -7,6 +7,7 @@
  */
 
 #include <netinet/in.h> /* struct sockaddr_in, INET_ADDRSTRLEN */
+#include <stdbool.h>    /* bool */
 #include <stddef.h>     /* size_t */
 #include <stdint.h>     /* uint16_t */
 
@@ -44,6 +45,15 @@ port_result scan_port(const scan_target *target, uint16_t port, int timeout_ms);
  */
 int scan_port_range(const scan_target *target, port_result *results, size_t count,
                     int timeout_ms, int thread_count);
+
+/*
+ * Ask all running scans to stop as soon as possible (used for Ctrl+C).
+ * Async-signal-safe: may be called from a signal handler.
+ */
+void request_scan_stop(void);
+
+/* True once request_scan_stop() has been called. */
+bool scan_stop_requested(void);
 
 /* Turn a port_state into a printable word such as "open". */
 const char *port_state_to_string(port_state state);

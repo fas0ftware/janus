@@ -83,7 +83,7 @@ void print_result_text(const scan_report *report)
     }
 
     printf("\nScanned %zu port(s) in %.2f s: %zu open, %zu closed, %zu filtered",
-           report->result_count, report->duration_ms / 1000.0,
+           report->result_count - counts.not_scanned, report->duration_ms / 1000.0,
            counts.open, counts.closed, counts.filtered);
     if (counts.error > 0) {
         printf(", %zu error", counts.error);
@@ -155,7 +155,8 @@ void print_result_json(const scan_report *report)
     print_json_string(report->started_at);
     /* Whole milliseconds: integers are simpler for other programs to read. */
     printf(",\n  \"duration_ms\": %.0f,\n", report->duration_ms);
-    printf("  \"ports_scanned\": %zu,\n", report->result_count);
+    printf("  \"ports_requested\": %zu,\n", report->result_count);
+    printf("  \"ports_scanned\": %zu,\n", report->result_count - counts.not_scanned);
     printf("  \"interrupted\": %s,\n", report->interrupted ? "true" : "false");
 
     printf("  \"open_ports\": [");

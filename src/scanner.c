@@ -6,6 +6,7 @@
 #include <netdb.h>      /* getaddrinfo, freeaddrinfo, gai_strerror */
 #include <poll.h>       /* poll, struct pollfd */
 #include <pthread.h>    /* pthread_create, pthread_join, pthread_mutex_* */
+#include <stdatomic.h>  /* atomic_bool, atomic_load, atomic_store */
 #include <stdbool.h>    /* bool */
 #include <stdlib.h>     /* calloc, free */
 #include <string.h>     /* memset, memcpy, strerror */
@@ -13,6 +14,27 @@
 #include <unistd.h>     /* close */
 
 #include "utils.h"
+
+/* Longest single poll() wait, so a stop request is noticed quickly. */
+#define POLL_SLICE_MS 100
+
+/*
+ * Set by the Ctrl+C signal handler, read by every worker thread.
+ * A plain bool would be a data race (two threads, one writes, no lock).
+ * An atomic variable is safe both across threads and inside a signal
+ * handler, because reads and writes happen as one indivisible step.
+ */
+static atomic_bool stop_requested = false;
+
+void request_scan_stop(void)
+{
+    atomic_store(&stop_requested, true);
+}
+
+bool scan_stop_requested(void)
+{
+    return atomic_load(&stop_requested);
+}
 
 int resolve_target(const char *host, scan_target *target)
 {
@@ -99,9 +121,10 @@ static port_state connect_with_timeout(const struct sockaddr_in *address,
         return PORT_OPEN;
     }
     if (errno != EINPROGRESS) {
-        port_state state = classify_connect_error(errno);
+        int connect_error = errno; /* save it: close() may change errno */
+        port_state state = classify_connect_error(connect_error);
         if (state == PORT_ERROR) {
-            *error_code = errno;
+            *error_code = connect_error;
         }
         close(fd);
         return state;
@@ -109,18 +132,34 @@ static port_state connect_with_timeout(const struct sockaddr_in *address,
 
     /*
      * Wait until the socket becomes writable (handshake finished, either
-     * way) or until the timeout expires. poll returns 0 on timeout.
+     * way) or until the timeout expires. Instead of one long poll() we wait
+     * in short slices, so a Ctrl+C is noticed within POLL_SLICE_MS even
+     * when the timeout is long.
      */
     struct pollfd watch = {.fd = fd, .events = POLLOUT, .revents = 0};
-    int ready = poll(&watch, 1, timeout_ms);
-    if (ready == 0) {
-        close(fd);
-        return PORT_FILTERED; /* silence: no SYN-ACK and no RST */
-    }
-    if (ready == -1) {
-        *error_code = errno; /* includes EINTR when Ctrl+C interrupts poll */
-        close(fd);
-        return PORT_ERROR;
+    double deadline_ms = monotonic_time_ms() + timeout_ms;
+    for (;;) {
+        if (scan_stop_requested()) {
+            close(fd);
+            return PORT_NOT_SCANNED;
+        }
+        double remaining_ms = deadline_ms - monotonic_time_ms();
+        if (remaining_ms <= 0) {
+            close(fd);
+            return PORT_FILTERED; /* silence: no SYN-ACK and no RST */
+        }
+        int wait_ms = remaining_ms > POLL_SLICE_MS ? POLL_SLICE_MS : (int)remaining_ms + 1;
+
+        int ready = poll(&watch, 1, wait_ms);
+        if (ready > 0) {
+            break; /* handshake finished, result is read below */
+        }
+        if (ready == -1 && errno != EINTR) {
+            *error_code = errno;
+            close(fd);
+            return PORT_ERROR;
+        }
+        /* ready == 0 (slice over) or EINTR (a signal arrived): loop again */
     }
 
     /* The socket is "ready", but did the handshake succeed? Ask the kernel. */
@@ -170,7 +209,12 @@ static bool take_next_index(work_queue *queue, size_t *index_out)
 {
     bool has_work = false;
 
-    pthread_mutex_lock(&queue->lock);
+    if (scan_stop_requested()) {
+        return false; /* Ctrl+C: do not start any new port */
+    }
+    if (pthread_mutex_lock(&queue->lock) != 0) {
+        return false; /* cannot happen with a valid mutex; stop this worker */
+    }
     /* Only one thread at a time can be between lock and unlock. */
     if (queue->next_index < queue->count) {
         *index_out = queue->next_index;
@@ -242,7 +286,10 @@ int scan_port_range(const scan_target *target, port_result *results, size_t coun
 
     /* Wait for every worker to finish before the results are read. */
     for (size_t i = 0; i < started; i++) {
-        pthread_join(threads[i], NULL);
+        int error = pthread_join(threads[i], NULL);
+        if (error != 0) {
+            print_error("cannot join worker thread: %s", strerror(error));
+        }
     }
 
     free(threads);

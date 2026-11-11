@@ -4,6 +4,7 @@
 #   make         build the release binary (./janus)
 #   make debug   build with debug info and sanitizers (./janus-debug)
 #   make test    build, then run tests/run_tests.sh
+#   make check   run the tests again under ASan/UBSan, valgrind and TSan
 #   make clean   remove all build output
 
 CC      := gcc
@@ -31,7 +32,7 @@ TARGET       := janus
 DEBUG_TARGET := janus-debug
 
 # These targets are commands, not files, so make must always run them.
-.PHONY: all debug clean test
+.PHONY: all debug clean test check test-debug memcheck tsan
 
 all: $(TARGET)
 
@@ -66,6 +67,32 @@ $(JSON_TEST): tests/test_json_escape.c $(SOURCES) | $(BUILD_DIR)/release
 
 test: $(TARGET) $(JSON_TEST)
 	JSON_TEST=$(JSON_TEST) ./tests/run_tests.sh
+
+# --- Hardening checks ---------------------------------------------------------
+
+# Whole test suite against the AddressSanitizer/UBSan build.
+test-debug: $(DEBUG_TARGET)
+	JANUS_BINARY=./$(DEBUG_TARGET) ./tests/run_tests.sh
+
+# Valgrind: any leak or memory error makes the command fail (exit code 99).
+VALGRIND := valgrind --leak-check=full --show-leak-kinds=all \
+            --errors-for-leak-kinds=all --error-exitcode=99 -q
+memcheck: $(TARGET)
+	$(VALGRIND) ./$(TARGET) -t 127.0.0.1 -p 1-2000 --threads 16 > /dev/null
+	$(VALGRIND) ./$(TARGET) -t localhost -p 22,80,443 --json > /dev/null
+	$(VALGRIND) ./$(TARGET) -t 127.0.0.1 -p 0 2> /dev/null; test $$? -eq 2
+	@echo "valgrind: no leaks or memory errors"
+
+# ThreadSanitizer finds data races between threads. It cannot be combined
+# with AddressSanitizer, so it gets its own binary.
+TSAN_TARGET := $(BUILD_DIR)/janus-tsan
+$(TSAN_TARGET): $(SOURCES) | $(BUILD_DIR)/release
+	$(CC) $(CFLAGS) -g -O1 -fsanitize=thread $(SOURCES) -o $@
+tsan: $(TSAN_TARGET)
+	./$(TSAN_TARGET) -t 127.0.0.1 -p 1-3000 --threads 64 > /dev/null
+	@echo "tsan: no data races reported"
+
+check: test-debug memcheck tsan
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET) $(DEBUG_TARGET)

@@ -98,6 +98,31 @@ expect_output "8 threads give the same result" "30 port\(s\).*1 open, 29 closed"
 expect_output "more threads than ports is fine" "^$OPEN_PORT/tcp +open" \
     "$BINARY" -t "$HOST" -p "$OPEN_PORT" --threads 256
 
+# ---- Ctrl+C and write errors ------------------------------------------------
+# The filtered port with a 10 s timeout keeps Janus busy; SIGINT must stop it fast.
+"$BINARY" -t "$HOST" -p "$CLOSED_PORT,$FILTERED_PORT" --timeout 10000 --threads 1 --json \
+    >"$ready_file.out" 2>/dev/null &
+janus_pid=$!
+sleep 0.5
+kill -INT "$janus_pid"
+SECONDS=0
+wait "$janus_pid"
+interrupt_exit=$?
+if [[ $interrupt_exit -eq 130 && $SECONDS -le 2 ]] &&
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["interrupted"] and d["summary"]["not_scanned"] == 1' \
+        "$ready_file.out"; then
+    pass "Ctrl+C stops the scan quickly with exit code 130 and partial JSON"
+else
+    fail "Ctrl+C stops the scan quickly (exit $interrupt_exit after ${SECONDS}s)"
+fi
+rm -f "$ready_file.out"
+
+if [[ -w /dev/full ]]; then
+    # /dev/full rejects every write with "No space left on device".
+    expect_exit "write error on stdout is reported" 1 \
+        bash -c '"$0" -t "$1" -p "$2" >/dev/full' "$BINARY" "$HOST" "$CLOSED_PORT"
+fi
+
 # ---- JSON output ------------------------------------------------------------
 json_output="$("$BINARY" -t localhost -p "$CLOSED_PORT,$OPEN_PORT" --json 2>/dev/null)"
 if python3 -c '
@@ -107,7 +132,7 @@ assert data["scanner"] == "janus", data
 assert data["target"] == "localhost" and data["ip"] == "127.0.0.1", data
 assert [p["port"] for p in data["open_ports"]] == [int(sys.argv[2])], data
 assert data["open_ports"][0]["protocol"] == "tcp", data
-assert data["ports_scanned"] == 2 and data["summary"]["closed"] == 1, data
+assert data["ports_requested"] == 2 and data["ports_scanned"] == 2 and data["summary"]["closed"] == 1, data
 assert isinstance(data["duration_ms"], int) and data["interrupted"] is False, data
 assert data["timestamp"].endswith("Z"), data
 ' "$json_output" "$OPEN_PORT"; then
