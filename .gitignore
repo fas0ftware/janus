@@ -1,0 +1,16 @@
+# Build output
+build/
+janus
+janus-debug
+*.o
+*.d
+
+# Valgrind and core dumps
+vgcore.*
+core
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*~
