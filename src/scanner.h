@@ -79,6 +79,24 @@ int scan_port_range(const scan_target *target, port_result *results, size_t coun
                     const scan_settings *settings);
 
 /*
+ * Scan the ports of many hosts with ONE pool of settings->thread_count workers.
+ *
+ * results holds host_count blocks of ports_per_host entries (host-major: the
+ * ports of host h are results[h * ports_per_host ...], each .port must be set).
+ * Only hosts with scan_host[h] == true are scanned. All (host, port) pairs go
+ * into a single queue, so workers never idle just because one host has fewer
+ * ports than there are threads. Hosts are started in order, so after Ctrl+C
+ * the scanned hosts are (nearly) a prefix of the list.
+ *
+ * host_ms[h] receives how long host h took, from its first port being started
+ * to its last port finishing (0 if it was not scanned or not finished).
+ * Returns 0, or -1 on a setup error.
+ */
+int scan_host_ports(const scan_target *targets, const bool *scan_host, size_t host_count,
+                    port_result *results, size_t ports_per_host, const scan_settings *settings,
+                    double *host_ms);
+
+/*
  * Keep the first line of raw service output as printable ASCII (other bytes
  * become '.'), trimmed, at most out_size - 1 characters. Exposed for tests.
  */

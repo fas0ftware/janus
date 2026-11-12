@@ -95,23 +95,26 @@ static int resolve_host(const char *host, const scan_options *options, scan_targ
     return 0;
 }
 
-/*
- * Port-scan a resolved host, unless --discover found it down (then there is
- * nothing to scan and the report stays as prepared). Returns 0, or -2 on a setup error.
- */
-static int scan_resolved_host(const scan_options *options, const scan_settings *settings,
-                              const scan_target *target, port_result *results, scan_report *report)
+/* True if at least one port of this host was actually checked. */
+static bool has_scanned_port(const scan_report *report)
 {
-    if (report->status == HOST_DOWN) {
-        return 0;
+    for (size_t i = 0; i < report->result_count; i++) {
+        if (report->results[i].state != PORT_NOT_SCANNED) {
+            return true;
+        }
     }
-    double start_ms = monotonic_time_ms();
-    if (scan_port_range(target, results, options->port_count, settings) != 0) {
-        return -2;
+    return false;
+}
+
+/* True if at least one port of this host was never checked (the scan was stopped). */
+static bool has_unscanned_port(const scan_report *report)
+{
+    for (size_t i = 0; i < report->result_count; i++) {
+        if (report->results[i].state == PORT_NOT_SCANNED) {
+            return true;
+        }
     }
-    report->duration_ms = monotonic_time_ms() - start_ms;
-    report->interrupted = scan_stop_requested();
-    return 0;
+    return false;
 }
 
 int main(int argc, char *argv[])
@@ -133,6 +136,8 @@ int main(int argc, char *argv[])
     scan_report *reports = NULL;
     bool *resolved_ok = NULL; /* discovery input: which hosts resolved */
     bool *host_up = NULL;     /* discovery output: which hosts answered */
+    bool *to_scan = NULL;     /* hosts that get a port scan: resolved, and not down */
+    double *host_ms = NULL;   /* how long each host's port scan took */
 
     if (expand_targets(options.target, &targets) != 0) {
         free_options(&options);
@@ -149,7 +154,10 @@ int main(int argc, char *argv[])
     reports = calloc(targets.count, sizeof *reports);
     resolved_ok = calloc(targets.count, sizeof *resolved_ok);
     host_up = calloc(targets.count, sizeof *host_up);
-    if (resolved == NULL || results == NULL || reports == NULL || resolved_ok == NULL || host_up == NULL) {
+    to_scan = calloc(targets.count, sizeof *to_scan);
+    host_ms = calloc(targets.count, sizeof *host_ms);
+    if (resolved == NULL || results == NULL || reports == NULL || resolved_ok == NULL || host_up == NULL ||
+        to_scan == NULL || host_ms == NULL) {
         print_error("out of memory (%zu hosts x %zu ports)", targets.count, options.port_count);
         exit_code = EXIT_SCAN_ERROR;
         goto cleanup;
@@ -200,17 +208,32 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* Step 3: port-scan the hosts one after another (ports of one host run in parallel). */
-    size_t scanned_hosts = 0;
-    for (size_t h = 0; h < targets.count && !scan_stop_requested(); h++) {
-        scanned_hosts++;
-        if (!resolved_ok[h]) {
-            continue; /* the resolve error was already printed */
+    /* Step 3: port-scan every host that resolved and is not down, all through one worker pool. */
+    for (size_t h = 0; h < targets.count; h++) {
+        to_scan[h] = resolved_ok[h] && reports[h].status != HOST_DOWN;
+    }
+    if (scan_host_ports(resolved, to_scan, targets.count, results, options.port_count, &settings, host_ms) != 0) {
+        exit_code = EXIT_SCAN_ERROR;
+        goto cleanup;
+    }
+    for (size_t h = 0; h < targets.count; h++) {
+        if (to_scan[h]) {
+            reports[h].duration_ms = host_ms[h];
+            reports[h].interrupted = scan_stop_requested() && has_unscanned_port(&reports[h]);
         }
-        if (scan_resolved_host(&options, &settings, &resolved[h], results + h * options.port_count,
-                               &reports[h]) != 0) {
-            exit_code = EXIT_SCAN_ERROR;
-            goto cleanup;
+    }
+
+    /*
+     * Hosts are started in order, so after Ctrl+C the hosts that were reached form (nearly) a
+     * prefix of the list. Report up to the last host where any port was checked.
+     */
+    size_t scanned_hosts = targets.count;
+    if (scan_stop_requested()) {
+        scanned_hosts = 0;
+        for (size_t h = 0; h < targets.count; h++) {
+            if (has_scanned_port(&reports[h])) {
+                scanned_hosts = h + 1;
+            }
         }
     }
     double duration_ms = monotonic_time_ms() - start_ms;
@@ -254,6 +277,8 @@ int main(int argc, char *argv[])
 
 cleanup:
     close_service_database();
+    free(host_ms);
+    free(to_scan);
     free(host_up);
     free(resolved_ok);
     free(reports);

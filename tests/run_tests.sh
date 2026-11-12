@@ -401,6 +401,56 @@ else
 fi
 rm -f "$ready_file.out"
 
+# ---- v1.4: one worker pool for all hosts ------------------------------------------
+# "localhost" and "127.1" are different strings for the same machine, so each counts as its own host.
+# Every host has one silent port (1 s timeout): three hosts take about 1 s in parallel, 3 s one by one.
+start_ns=$(date +%s%N)
+parallel_out="$("$BINARY" -t "$HOST,localhost,127.1" -p "$FILTERED_PORT" --timeout 1000 2>&1)"
+elapsed_ms=$(( ($(date +%s%N) - start_ns) / 1000000 ))
+if [[ "$parallel_out" == *"Scanned 3 host(s)"* && $elapsed_ms -lt 2200 ]]; then
+    pass "hosts with few ports are scanned in parallel (${elapsed_ms} ms for 3 hosts x 1 s)"
+else
+    fail "hosts with few ports are scanned in parallel (${elapsed_ms} ms)"
+    sed 's/^/    | /' <<<"$parallel_out"
+fi
+duration_json="$("$BINARY" -t "$HOST,127.0.0.2" -p "$FILTERED_PORT" --timeout 600 --threads 4 --json 2>/dev/null)"
+if python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+hosts = {h["target"]: h for h in d["hosts"]}
+slow, fast = hosts["127.0.0.1"], hosts["127.0.0.2"]
+assert slow["duration_ms"] >= 500 and slow["summary"]["filtered"] == 1, slow
+assert fast["duration_ms"] < 400 and fast["summary"]["closed"] == 1, fast
+' "$duration_json"; then
+    pass "per-host duration_ms is measured per host, not for the whole run"
+else
+    fail "per-host duration_ms is measured per host, not for the whole run"
+    sed 's/^/    | /' <<<"$duration_json"
+fi
+# The test server listens on 127.0.0.1 only, so exactly one of the 14 hosts has an open port.
+many_out="$("$BINARY" -t 127.0.0.0/28 -p "$OPEN_PORT,$CLOSED_PORT" --threads 64 --timeout 300 2>&1)"
+if [[ "$many_out" == *"Scanned 14 host(s)"*"1 with open ports"* && "$many_out" == *"127.0.0.1: 1 open"* ]]; then
+    pass "many hosts with a few ports each give complete results"
+else
+    fail "many hosts with a few ports each give complete results"
+    sed 's/^/    | /' <<<"$many_out"
+fi
+# Ctrl+C in a multi-host scan: one thread is stuck on a 10 s timeout and must stop within ~0.1 s.
+"$BINARY" -t "$HOST,localhost,127.1" -p "$FILTERED_PORT" --timeout 10000 --threads 1 >"$ready_file.out" 2>"$ready_file.err" &
+janus_pid=$!
+sleep 0.5
+kill -INT "$janus_pid"
+SECONDS=0
+wait "$janus_pid"
+interrupt_exit=$?
+if [[ $interrupt_exit -eq 130 && $SECONDS -le 2 ]] && grep -q "scan interrupted after" "$ready_file.err"; then
+    pass "Ctrl+C stops a multi-host scan quickly with exit code 130"
+else
+    fail "Ctrl+C stops a multi-host scan quickly (exit $interrupt_exit after ${SECONDS}s)"
+    sed 's/^/    | /' "$ready_file.err"
+fi
+rm -f "$ready_file.out" "$ready_file.err"
+
 # ---- summary ----------------------------------------------------------------
 echo
 echo "$passed passed, $failed failed"
