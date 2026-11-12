@@ -8,9 +8,11 @@
 
 /*
  * Copy the datagram Janus sends to a UDP port into buffer and return its
- * length. Most UDP services ignore an empty datagram, so DNS (53) and NTP
- * (123) get a minimal, harmless query that makes them answer; every other
- * port gets an empty datagram (length 0). Exposed for tests.
+ * length. Most UDP services ignore an empty datagram, so a few well-known
+ * discovery services get their standard, harmless query: DNS (53), NTP (123),
+ * NetBIOS name service (137), SSDP (1900) and mDNS (5353). Every other port
+ * gets an empty datagram (length 0). Nothing is written if buffer_size is too
+ * small. Exposed for tests.
  */
 size_t udp_probe_payload(uint16_t port, unsigned char *buffer, size_t buffer_size);
 

@@ -1,7 +1,7 @@
 # Janus
 
 [![CI](https://github.com/fas0ftware/janus/actions/workflows/ci.yml/badge.svg)](https://github.com/fas0ftware/janus/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.4.0-blue)
+![Version](https://img.shields.io/badge/version-1.5.0-blue)
 ![C11](https://img.shields.io/badge/C11-POSIX%20%2B%20pthreads-555)
 ![Checks](https://img.shields.io/badge/ASan%20%C2%B7%20UBSan%20%C2%B7%20TSan%20%C2%B7%20valgrind-clean-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -25,8 +25,9 @@ Named after Janus, the Roman god of gates and doorways. Ports are doors.
 
 - Full TCP connect scan: **open**, **closed** and **filtered** (timeout) detection
 - **UDP scan** (`--udp`, no root): a reply means **open**, an ICMP "port
-  unreachable" means **closed**, silence means **open|filtered**. DNS and NTP
-  get a real query so they answer; the default is the 20 most common UDP ports
+  unreachable" means **closed**, silence means **open|filtered**. DNS, NTP,
+  NetBIOS, SSDP and mDNS get their standard query so they answer; the default
+  is the 20 most common UDP ports
 - Non-blocking `connect()` + `poll()` with a per-port timeout
 - **IPv4 and IPv6** (`-4` / `-6` to force a family when resolving names)
 - **Several targets per run:** lists (`host1,host2`) and IPv4 **CIDR blocks**
@@ -254,8 +255,8 @@ docs/
 
 ## Tests and checks
 
-`make test` runs 31 C unit checks (target lists, CIDR edge cases such as /31,
-/32 and oversized blocks, banner sanitizing, UDP probe payloads) and 93 end-to-end checks against
+`make test` runs 38 C unit checks (target lists, CIDR edge cases such as /31,
+/32 and oversized blocks, banner sanitizing, UDP probe payloads) and 95 end-to-end checks against
 local listeners: open/closed/filtered, threads (also across hosts), Ctrl+C, write errors, JSON,
 banners (including a listener that sends terminal escape codes), top ports,
 lists, CIDR, `--open`, unresolvable hosts in a list, IPv6 and `-4`/`-6`, and
@@ -288,7 +289,9 @@ it, plus cppcheck.
   packet on all probe ports looks down and is skipped. Probe more ports with
   `--discover-ports` when that matters
 - UDP: most services ignore an empty datagram, so many open UDP ports show up
-  as `open|filtered`. Only DNS and NTP get a protocol-specific probe. Linux
+  as `open|filtered`. Only DNS (53), NTP (123), NetBIOS (137), SSDP (1900) and
+  mDNS (5353) get a protocol-specific probe; SNMP is deliberately not probed,
+  because it would need a guessed community string. Linux
   also rate-limits ICMP errors (about one per second per remote host), so a
   fast UDP scan of a *remote* host can report closed ports as `open|filtered`
   (localhost is exempt). Use a longer `--timeout` and fewer `--threads` there
@@ -300,11 +303,13 @@ it, plus cppcheck.
 
 ## Roadmap
 
-- More UDP service probes (mDNS, SSDP, SNMP)
 - Integration as the scanning engine of `network-monitor` (via `--json`)
 
 ## Changelog
 
+- **1.5.0** – more UDP probes: NetBIOS name service (137), SSDP (1900) and mDNS
+  (5353) get their standard discovery query, so these services answer and show
+  up as `open` instead of `open|filtered`.
 - **1.4.0** – one worker pool for all hosts: `(host, port)` pairs go into a
   single queue, so small port lists on many hosts no longer leave threads
   idle. `duration_ms` is now measured per host. Fixed the README limitation
