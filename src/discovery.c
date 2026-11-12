@@ -21,7 +21,7 @@ typedef struct {
     size_t host_count;
     const uint16_t *probe_ports;
     size_t job_count;
-    const scan_settings *settings; /* grab_banner is always false here */
+    const scan_settings *settings; /* always TCP, grab_banner is always false here */
     atomic_size_t next_job;        /* each worker claims jobs with fetch_add */
     atomic_bool *alive;            /* one flag per host, set by whichever worker sees an answer */
 } discovery_queue;
@@ -63,9 +63,10 @@ int discover_hosts(const scan_target *targets, const bool *eligible, size_t host
         return 0;
     }
 
-    /* Probing never reads banners, whatever the main scan will do. */
+    /* Probing is always a plain TCP connect, whatever the main scan will do. */
     scan_settings probe_settings = *settings;
     probe_settings.grab_banner = false;
+    probe_settings.protocol = PROTOCOL_TCP;
 
     discovery_queue queue = {
         .targets = targets,

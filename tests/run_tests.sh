@@ -17,6 +17,9 @@ CLOSED_PORT=29801   # nothing listens here
 FILTERED_PORT=29810 # full accept queue: SYNs are silently dropped
 BANNER_PORT=29820   # greets every client with an SSH-style banner
 EVIL_PORT=29821     # greets with terminal escape codes
+UDP_REPLY_PORT=29830  # UDP: answers every datagram
+UDP_SILENT_PORT=29831 # UDP: receives but never answers
+UDP_CLOSED_PORT=29832 # UDP: nothing listens here
 passed=0
 failed=0
 
@@ -64,17 +67,24 @@ python3 "$TESTS_DIR/banner_listener.py" "$HOST" "$BANNER_PORT" 'SSH-2.0-JanusTes
 banner_pid=$!
 python3 "$TESTS_DIR/banner_listener.py" "$HOST" "$EVIL_PORT" '\x1b]0;pwned\x07\x1b[2Jowned\r\n' &
 evil_pid=$!
+udp_ready="$(mktemp -u)"
+python3 "$TESTS_DIR/udp_listener.py" "$HOST" "$UDP_REPLY_PORT" reply "$udp_ready.reply" &
+udp_reply_pid=$!
+python3 "$TESTS_DIR/udp_listener.py" "$HOST" "$UDP_SILENT_PORT" silent "$udp_ready.silent" &
+udp_silent_pid=$!
 v6_pid=""
 if python3 -c 'import socket; s=socket.socket(socket.AF_INET6); s.bind(("::1", 0))' 2>/dev/null; then
     python3 "$TESTS_DIR/banner_listener.py" "::1" "$BANNER_PORT" 'SSH-2.0-V6\r\n' &
     v6_pid=$!
 fi
-trap 'kill "$server_pid" "$filtered_pid" "$banner_pid" "$evil_pid" $v6_pid 2>/dev/null; rm -f "$ready_file"' EXIT
+trap 'kill "$server_pid" "$filtered_pid" "$banner_pid" "$evil_pid" "$udp_reply_pid" "$udp_silent_pid" $v6_pid 2>/dev/null; rm -f "$ready_file" "$udp_ready.reply" "$udp_ready.silent"' EXIT
 
 wait_for_port "$OPEN_PORT" || { echo "listener on $OPEN_PORT did not start"; exit 1; }
 wait_for_port "$BANNER_PORT" || { echo "listener on $BANNER_PORT did not start"; exit 1; }
 wait_for_port "$EVIL_PORT" || { echo "listener on $EVIL_PORT did not start"; exit 1; }
 for _ in $(seq 30); do [[ -f "$ready_file" ]] && break; sleep 0.1; done
+for _ in $(seq 30); do [[ -f "$udp_ready.reply" && -f "$udp_ready.silent" ]] && break; sleep 0.1; done
+[[ -f "$udp_ready.reply" && -f "$udp_ready.silent" ]] || { echo "UDP listeners did not start"; exit 1; }
 
 # ---- command-line validation ------------------------------------------------
 expect_exit "--help exits with 0" 0 "$BINARY" --help
@@ -328,6 +338,66 @@ if [[ $interrupt_exit -eq 130 && $SECONDS -le 2 ]] &&
 else
     fail "Ctrl+C during discovery stops quickly (exit $interrupt_exit after ${SECONDS}s)"
     sed 's/^/    | /' "$ready_file.out"
+fi
+rm -f "$ready_file.out"
+
+# ---- v1.3: UDP scanning (--udp) ---------------------------------------------------
+# closed = ICMP port unreachable (ECONNREFUSED), open = a reply, open|filtered = silence.
+expect_output "--udp: a port that answers is open" "^$UDP_REPLY_PORT/udp +open +[a-z]" \
+    "$BINARY" -t "$HOST" --udp -p "$UDP_REPLY_PORT" --timeout 400
+expect_output "--udp: no listener means closed (ICMP port unreachable)" "1 port\(s\).*0 open, 0 open\|filtered, 1 closed" \
+    "$BINARY" -t "$HOST" --udp -p "$UDP_CLOSED_PORT" --timeout 400
+expect_output "--udp: a listener that stays silent is open|filtered" "^$UDP_SILENT_PORT/udp +open\|filtered" \
+    "$BINARY" -t "$HOST" --udp -p "$UDP_SILENT_PORT" --timeout 300
+expect_output "-u is the short form of --udp" "^$UDP_REPLY_PORT/udp +open" \
+    "$BINARY" -t "$HOST" -u -p "$UDP_REPLY_PORT" --timeout 400
+udp_json="$("$BINARY" -t "$HOST" --udp -p "$UDP_REPLY_PORT,$UDP_SILENT_PORT,$UDP_CLOSED_PORT" --timeout 400 --json 2>/dev/null)"
+if python3 -c '
+import json, sys
+d = json.loads(sys.argv[1]); reply, silent = int(sys.argv[2]), int(sys.argv[3])
+assert d["protocol"] == "udp", d
+assert [p["port"] for p in d["open_ports"]] == [reply] and d["open_ports"][0]["protocol"] == "udp", d
+assert [p["port"] for p in d["open_filtered_ports"]] == [silent], d
+assert d["summary"] == {"open": 1, "open_filtered": 1, "closed": 1, "filtered": 0, "error": 0, "not_scanned": 0}, d["summary"]
+' "$udp_json" "$UDP_REPLY_PORT" "$UDP_SILENT_PORT"; then
+    pass "UDP JSON has protocol, open_ports, open_filtered_ports and counts"
+else
+    fail "UDP JSON has protocol, open_ports, open_filtered_ports and counts"
+    sed 's/^/    | /' <<<"$udp_json"
+fi
+tcp_json="$("$BINARY" -t "$HOST" -p "$CLOSED_PORT" --json 2>/dev/null)"
+if python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+assert d["protocol"] == "tcp" and "open_filtered_ports" not in d and "open_filtered" not in d["summary"], d
+' "$tcp_json"; then
+    pass "TCP JSON says protocol tcp and has no UDP-only keys"
+else
+    fail "TCP JSON says protocol tcp and has no UDP-only keys"
+fi
+expect_exit "--udp with --banner is a usage error" 2 "$BINARY" -t "$HOST" --udp --banner
+expect_exit "--udp --top-ports above the UDP table is a usage error" 2 "$BINARY" -t "$HOST" --udp --top-ports 21
+expect_output "--udp --top-ports 5 scans 5 ports" "Scanned 5 port\(s\)" "$BINARY" -t "$HOST" --udp --top-ports 5 --timeout 300
+expect_output "--udp without ports scans the common UDP ports" "Scanned 20 port\(s\)" "$BINARY" -t "$HOST" --udp --timeout 300
+expect_output "--udp works on several hosts" "Scanned 2 host\(s\).*1 with open ports" \
+    "$BINARY" -t "$HOST,127.0.0.2" --udp -p "$UDP_REPLY_PORT" --timeout 400
+expect_output "--udp combines with --discover (TCP probes, UDP scan)" "^$UDP_REPLY_PORT/udp +open" \
+    "$BINARY" -t "$HOST" --udp --discover -p "$UDP_REPLY_PORT" --timeout 400
+
+# Ctrl+C while a UDP probe waits for a reply that never comes.
+"$BINARY" -t "$HOST" --udp -p "$UDP_SILENT_PORT" --timeout 10000 --threads 1 --json >"$ready_file.out" 2>/dev/null &
+janus_pid=$!
+sleep 0.5
+kill -INT "$janus_pid"
+SECONDS=0
+wait "$janus_pid"
+interrupt_exit=$?
+if [[ $interrupt_exit -eq 130 && $SECONDS -le 2 ]] &&
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["interrupted"] and d["summary"]["not_scanned"] == 1, d' \
+        "$ready_file.out"; then
+    pass "Ctrl+C stops a UDP scan quickly with exit code 130"
+else
+    fail "Ctrl+C stops a UDP scan quickly (exit $interrupt_exit after ${SECONDS}s)"
 fi
 rm -f "$ready_file.out"
 

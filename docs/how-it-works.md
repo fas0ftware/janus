@@ -114,7 +114,31 @@ root. A TCP probe stays unprivileged, but a host that drops packets on all the
 probe ports looks the same as a host that is off. Use `--discover-ports` to
 probe the ports your devices actually use.
 
-## 8. Stopping cleanly
+## 8. UDP: answers are rare
+
+UDP has no handshake, so there is no SYN-ACK to wait for. Janus opens a UDP
+socket, calls `connect()` on it (which sends nothing, it only fixes the peer),
+and sends one datagram. Then it waits:
+
+- a datagram comes back: something listens, the port is **open**
+- the kernel reports `ECONNREFUSED`: the target sent an ICMP "port unreachable",
+  the port is **closed**. The `connect()` in the first step is what makes Linux
+  hand this ICMP error to the socket, without root or raw sockets
+- ICMP "host unreachable" or "administratively prohibited": **filtered**
+- nothing at all: **open|filtered**. An open port whose service ignores the
+  probe and a firewall that drops it look exactly the same
+
+Because UDP packets get lost, the probe is sent twice inside the timeout.
+Most services only answer a correctly formed request, so DNS (53) and NTP (123)
+get a minimal query; every other port gets an empty datagram, which is enough
+to make a *closed* port answer with ICMP but rarely makes an open one talk.
+
+Linux limits how fast it sends ICMP errors (`icmp_ratelimit`, roughly one per
+second per remote host). Against a remote host a fast scan can lose some of
+them, and those closed ports then show up as `open|filtered`. Loopback is
+exempt from the limit, which is why the tests can use closed UDP ports.
+
+## 9. Stopping cleanly
 
 `Ctrl+C` sends `SIGINT`. Janus' signal handler only sets an atomic flag (doing
 more inside a signal handler is unsafe). Workers check the flag before taking a

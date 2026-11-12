@@ -70,8 +70,14 @@ TARGETS_TEST := $(BUILD_DIR)/test_targets
 $(TARGETS_TEST): tests/test_targets.c $(SOURCES) | $(BUILD_DIR)/release
 	$(CC) $(CFLAGS) -g -fsanitize=address,undefined -I$(SRC_DIR) tests/test_targets.c $(LIB_SOURCES) -o $@
 
-test: $(TARGET) $(JSON_TEST) $(TARGETS_TEST)
+# Unit tests for the UDP probe payloads.
+UDP_TEST := $(BUILD_DIR)/test_udp
+$(UDP_TEST): tests/test_udp.c $(SOURCES) | $(BUILD_DIR)/release
+	$(CC) $(CFLAGS) -g -fsanitize=address,undefined -I$(SRC_DIR) tests/test_udp.c $(LIB_SOURCES) -o $@
+
+test: $(TARGET) $(JSON_TEST) $(TARGETS_TEST) $(UDP_TEST)
 	./$(TARGETS_TEST)
+	./$(UDP_TEST)
 	JSON_TEST=$(JSON_TEST) ./tests/run_tests.sh
 
 # --- Hardening checks ---------------------------------------------------------
@@ -91,6 +97,8 @@ memcheck: $(TARGET)
 	$(VALGRIND) ./$(TARGET) -t 10.0.0.0/8 2> /dev/null; test $$? -eq 2
 	$(VALGRIND) ./$(TARGET) -t 127.0.0.0/28,::1,no-such-host.invalid -p 22,80 --discover --timeout 200 --json > /dev/null
 	$(VALGRIND) ./$(TARGET) -t 127.0.0.0/29 -p 22 --discover-ports 1,2,3 --timeout 200 > /dev/null
+	$(VALGRIND) ./$(TARGET) -t 127.0.0.0/29 --udp -p 53,123,161 --timeout 200 --json > /dev/null
+	$(VALGRIND) ./$(TARGET) -t 127.0.0.1 --udp --banner 2> /dev/null; test $$? -eq 2
 	@echo "valgrind: no leaks or memory errors"
 
 # ThreadSanitizer finds data races between threads. It cannot be combined
@@ -101,6 +109,7 @@ $(TSAN_TARGET): $(SOURCES) | $(BUILD_DIR)/release
 tsan: $(TSAN_TARGET)
 	./$(TSAN_TARGET) -t 127.0.0.1 -p 1-3000 --threads 64 > /dev/null
 	./$(TSAN_TARGET) -t 127.0.0.0/29 --top-ports 100 --banner --threads 32 > /dev/null
+	./$(TSAN_TARGET) -t 127.0.0.0/29 --udp --threads 32 --timeout 200 > /dev/null
 	./$(TSAN_TARGET) -t 127.0.0.0/26 -p 22,80 --discover --discover-ports 22,80,443,445 --threads 64 > /dev/null
 	@echo "tsan: no data races reported"
 

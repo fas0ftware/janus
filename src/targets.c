@@ -20,6 +20,12 @@ const uint16_t top_ports[TOP_PORTS_MAX] = {
     49157, 1028,  873,   1755,  2717,  4899,  9100,  119,   37,
 };
 
+/* UDP services that answer scans or show up on home and office networks. */
+const uint16_t udp_top_ports[UDP_TOP_PORTS_MAX] = {
+    53,   123,  161,  137,  138,  67,   68,   69,   500,  514,
+    520,  631,  1434, 1701, 1900, 4500, 5060, 5353, 162,  11211,
+};
+
 static int add_host(target_list *list, size_t capacity, const char *host)
 {
     for (size_t i = 0; i < list->count; i++) {

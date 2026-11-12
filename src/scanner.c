@@ -14,6 +14,7 @@
 #include <sys/socket.h> /* socket, connect, getsockopt */
 #include <unistd.h>     /* close */
 
+#include "udp_scan.h"
 #include "utils.h"
 
 /* Longest single poll() wait, so a stop request is noticed quickly. */
@@ -297,6 +298,9 @@ static void read_banner(int fd, const scan_target *target, uint16_t port, int ti
 
 port_result scan_port(const scan_target *target, uint16_t port, const scan_settings *settings)
 {
+    if (settings->protocol == PROTOCOL_UDP) {
+        return scan_udp_port(target, port, settings);
+    }
     /* Copy the resolved address and fill in the port for this attempt. */
     struct sockaddr_storage address = target->address;
     if (target->family == AF_INET) {
@@ -438,6 +442,8 @@ const char *port_state_to_string(port_state state)
         return "filtered";
     case PORT_ERROR:
         return "error";
+    case PORT_OPEN_FILTERED:
+        return "open|filtered";
     }
     return "unknown"; /* unreachable, but keeps the compiler happy */
 }

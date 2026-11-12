@@ -18,8 +18,12 @@ typedef enum {
     PORT_OPEN,        /* the target completed the TCP handshake (SYN-ACK) */
     PORT_CLOSED,      /* the target answered with RST: "connection refused" */
     PORT_FILTERED,    /* no answer before the timeout (likely a firewall) */
-    PORT_ERROR        /* a local error prevented the check */
+    PORT_ERROR,       /* a local error prevented the check */
+    PORT_OPEN_FILTERED /* UDP only: no reply and no ICMP error, so open or filtered */
 } port_state;
+
+/* Which transport protocol a scan uses. */
+typedef enum { PROTOCOL_TCP, PROTOCOL_UDP } scan_protocol;
 
 /* Whether a host answered during --discover. */
 typedef enum {
@@ -54,13 +58,17 @@ typedef struct {
 typedef struct {
     int timeout_ms;
     int thread_count;
-    bool grab_banner; /* read a short greeting from open ports */
+    bool grab_banner; /* read a short greeting from open ports (TCP only) */
+    scan_protocol protocol;
 } scan_settings;
 
 /* Resolve a host name, IPv4 or IPv6 address once, before scanning. Returns 0 on success. */
 int resolve_target(const char *host, address_family family, scan_target *target);
 
-/* Scan one port: non-blocking connect that waits at most timeout_ms. */
+/*
+ * Scan one port and wait at most timeout_ms: a non-blocking connect for TCP,
+ * a datagram probe for UDP (see udp_scan.h).
+ */
 port_result scan_port(const scan_target *target, uint16_t port, const scan_settings *settings);
 
 /*

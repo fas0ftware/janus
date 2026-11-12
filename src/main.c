@@ -75,6 +75,7 @@ static void prepare_host(const char *host, const scan_options *options, port_res
         .show_banner = options->grab_banner,
         .resolved = false,
         .status = HOST_STATUS_UNKNOWN,
+        .protocol = options->udp ? PROTOCOL_UDP : PROTOCOL_TCP,
     };
     if (format_utc_timestamp(report->started_at, sizeof report->started_at) != 0) {
         report->started_at[0] = '\0';
@@ -158,6 +159,7 @@ int main(int argc, char *argv[])
         .timeout_ms = options.timeout_ms,
         .thread_count = options.thread_count,
         .grab_banner = options.grab_banner,
+        .protocol = options.udp ? PROTOCOL_UDP : PROTOCOL_TCP,
     };
     char started_at[TIMESTAMP_SIZE] = "";
     if (format_utc_timestamp(started_at, sizeof started_at) != 0) {
