@@ -6,6 +6,7 @@
 #include <stdlib.h> /* calloc, free, strtol */
 #include <string.h> /* strchr, strlen */
 
+#include "discovery.h" /* DEFAULT_DISCOVER_PORTS */
 #include "targets.h"
 #include "utils.h"
 
@@ -21,6 +22,8 @@ enum {
     OPTION_TOP_PORTS,
     OPTION_BANNER,
     OPTION_OPEN,
+    OPTION_DISCOVER,
+    OPTION_DISCOVER_PORTS,
 };
 
 void print_usage(FILE *stream, const char *program_name)
@@ -40,6 +43,11 @@ void print_usage(FILE *stream, const char *program_name)
             "      --banner          read a short greeting from open ports (HTTP ports\n"
             "                        get a HEAD request); nothing else is sent\n"
             "      --open            with several hosts, list only hosts with open ports\n"
+            "      --discover        first find which hosts answer (TCP probes, no root\n"
+            "                        needed) and port-scan only those; down hosts are skipped\n"
+            "      --discover-ports <list>\n"
+            "                        ports to probe for --discover (default %s);\n"
+            "                        implies --discover\n"
             "  -4 / -6               use only IPv4 / only IPv6 when resolving names\n"
             "      --json            print the result as JSON (open ports only)\n"
             "  -h, --help            show this help and exit\n"
@@ -49,7 +57,7 @@ void print_usage(FILE *stream, const char *program_name)
             "explicit permission to test. Unauthorized scanning may be illegal.\n",
             JANUS_VERSION, program_name, MIN_CIDR_PREFIX, DEFAULT_PORTS, TOP_PORTS_MAX,
             MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, DEFAULT_TIMEOUT_MS,
-            MAX_THREAD_COUNT, DEFAULT_THREAD_COUNT);
+            MAX_THREAD_COUNT, DEFAULT_THREAD_COUNT, DEFAULT_DISCOVER_PORTS);
 }
 
 /*
@@ -196,6 +204,9 @@ void free_options(scan_options *options)
     free(options->ports); /* free(NULL) is allowed and does nothing */
     options->ports = NULL;
     options->port_count = 0;
+    free(options->discover_ports);
+    options->discover_ports = NULL;
+    options->discover_port_count = 0;
 }
 
 parse_status parse_arguments(int argc, char *argv[], scan_options *options)
@@ -203,6 +214,7 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
     const char *program_name = argv[0];
     const char *port_text = DEFAULT_PORTS;
     bool ports_given = false;
+    const char *discover_port_text = DEFAULT_DISCOVER_PORTS;
     int top_count = 0;
 
     options->target = NULL;
@@ -214,6 +226,9 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
     options->grab_banner = false;
     options->open_only = false;
     options->family = 0;
+    options->discover = false;
+    options->discover_ports = NULL;
+    options->discover_port_count = 0;
 
     static const struct option long_options[] = {
         {"target", required_argument, NULL, 't'},
@@ -224,6 +239,8 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
         {"top-ports", required_argument, NULL, OPTION_TOP_PORTS},
         {"banner", no_argument, NULL, OPTION_BANNER},
         {"open", no_argument, NULL, OPTION_OPEN},
+        {"discover", no_argument, NULL, OPTION_DISCOVER},
+        {"discover-ports", required_argument, NULL, OPTION_DISCOVER_PORTS},
         {"help", no_argument, NULL, 'h'},
         {"version", no_argument, NULL, 'v'},
         {NULL, 0, NULL, 0}, /* end marker */
@@ -251,6 +268,13 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
             break;
         case OPTION_OPEN:
             options->open_only = true;
+            break;
+        case OPTION_DISCOVER:
+            options->discover = true;
+            break;
+        case OPTION_DISCOVER_PORTS:
+            options->discover = true; /* giving probe ports only makes sense with discovery */
+            discover_port_text = optarg;
             break;
         case '4':
         case '6':
@@ -305,6 +329,11 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
     size_t target_length = strlen(options->target);
     if (target_length == 0 || target_length > 4096) {
         print_error("target must be 1-4096 characters long");
+        return PARSE_ERROR;
+    }
+
+    if (options->discover &&
+        parse_port_list(discover_port_text, &options->discover_ports, &options->discover_port_count) != 0) {
         return PARSE_ERROR;
     }
 

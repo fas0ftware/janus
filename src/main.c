@@ -12,6 +12,7 @@
 #include <string.h> /* memset, strerror */
 
 #include "cli.h"
+#include "discovery.h"
 #include "output.h"
 #include "scanner.h"
 #include "services.h"
@@ -54,9 +55,9 @@ static int install_signal_handlers(void)
     return 0;
 }
 
-/* One host: resolve, scan, fill *report. *target_out keeps the IP text alive. */
-static int scan_one_host(const char *host, const scan_options *options, const scan_settings *settings,
-                         scan_target *target_out, port_result *results, scan_report *report)
+/* Reset one host's results and report. Nothing is resolved or scanned yet. */
+static void prepare_host(const char *host, const scan_options *options, port_result *results,
+                         scan_report *report)
 {
     for (size_t i = 0; i < options->port_count; i++) {
         memset(&results[i], 0, sizeof results[i]);
@@ -73,20 +74,38 @@ static int scan_one_host(const char *host, const scan_options *options, const sc
         .interrupted = false,
         .show_banner = options->grab_banner,
         .resolved = false,
+        .status = HOST_STATUS_UNKNOWN,
     };
     if (format_utc_timestamp(report->started_at, sizeof report->started_at) != 0) {
         report->started_at[0] = '\0';
     }
+}
 
+/* Resolve the host name once. *target_out keeps the IP text alive. Returns 0 or -1 (message printed). */
+static int resolve_host(const char *host, const scan_options *options, scan_target *target_out,
+                        scan_report *report)
+{
     address_family family = options->family == 4 ? FAMILY_IPV4 : options->family == 6 ? FAMILY_IPV6 : FAMILY_ANY;
     if (resolve_target(host, family, target_out) != 0) {
         return -1;
     }
     report->ip_address = target_out->ip_text;
     report->resolved = true;
+    return 0;
+}
 
+/*
+ * Port-scan a resolved host, unless --discover found it down (then there is
+ * nothing to scan and the report stays as prepared). Returns 0, or -2 on a setup error.
+ */
+static int scan_resolved_host(const scan_options *options, const scan_settings *settings,
+                              const scan_target *target, port_result *results, scan_report *report)
+{
+    if (report->status == HOST_DOWN) {
+        return 0;
+    }
     double start_ms = monotonic_time_ms();
-    if (scan_port_range(target_out, results, options->port_count, settings) != 0) {
+    if (scan_port_range(target, results, options->port_count, settings) != 0) {
         return -2;
     }
     report->duration_ms = monotonic_time_ms() - start_ms;
@@ -111,6 +130,8 @@ int main(int argc, char *argv[])
     scan_target *resolved = NULL;
     port_result *results = NULL;
     scan_report *reports = NULL;
+    bool *resolved_ok = NULL; /* discovery input: which hosts resolved */
+    bool *host_up = NULL;     /* discovery output: which hosts answered */
 
     if (expand_targets(options.target, &targets) != 0) {
         free_options(&options);
@@ -125,7 +146,9 @@ int main(int argc, char *argv[])
     resolved = calloc(targets.count, sizeof *resolved);
     results = calloc(targets.count * options.port_count, sizeof *results);
     reports = calloc(targets.count, sizeof *reports);
-    if (resolved == NULL || results == NULL || reports == NULL) {
+    resolved_ok = calloc(targets.count, sizeof *resolved_ok);
+    host_up = calloc(targets.count, sizeof *host_up);
+    if (resolved == NULL || results == NULL || reports == NULL || resolved_ok == NULL || host_up == NULL) {
         print_error("out of memory (%zu hosts x %zu ports)", targets.count, options.port_count);
         exit_code = EXIT_SCAN_ERROR;
         goto cleanup;
@@ -142,17 +165,51 @@ int main(int argc, char *argv[])
     }
 
     double start_ms = monotonic_time_ms();
-    size_t scanned_hosts = 0;
+
+    /* Step 1: resolve every host (cheap for IP addresses and CIDR blocks). */
     bool any_resolved = false;
+    for (size_t h = 0; h < targets.count; h++) {
+        prepare_host(targets.hosts[h], &options, results + h * options.port_count, &reports[h]);
+    }
     for (size_t h = 0; h < targets.count && !scan_stop_requested(); h++) {
-        int result = scan_one_host(targets.hosts[h], &options, &settings, &resolved[h],
-                                   results + h * options.port_count, &reports[h]);
-        scanned_hosts++;
-        if (result == -2) {
+        resolved_ok[h] = resolve_host(targets.hosts[h], &options, &resolved[h], &reports[h]) == 0;
+        any_resolved |= resolved_ok[h];
+    }
+
+    /* Step 2 (--discover): probe all hosts in parallel and mark the silent ones as down. */
+    if (options.discover && !scan_stop_requested()) {
+        if (discover_hosts(resolved, resolved_ok, targets.count, options.discover_ports,
+                           options.discover_port_count, &settings, host_up) != 0) {
             exit_code = EXIT_SCAN_ERROR;
             goto cleanup;
         }
-        any_resolved |= result == 0;
+        /* After Ctrl+C the probes are incomplete, so no host is marked down on that basis. */
+        for (size_t h = 0; h < targets.count && !scan_stop_requested(); h++) {
+            if (resolved_ok[h]) {
+                reports[h].status = host_up[h] ? HOST_UP : HOST_DOWN;
+            }
+        }
+    }
+
+    /* Ctrl+C before any port was scanned: say so in the report (matters for a single host). */
+    if (scan_stop_requested()) {
+        for (size_t h = 0; h < targets.count; h++) {
+            reports[h].interrupted = true;
+        }
+    }
+
+    /* Step 3: port-scan the hosts one after another (ports of one host run in parallel). */
+    size_t scanned_hosts = 0;
+    for (size_t h = 0; h < targets.count && !scan_stop_requested(); h++) {
+        scanned_hosts++;
+        if (!resolved_ok[h]) {
+            continue; /* the resolve error was already printed */
+        }
+        if (scan_resolved_host(&options, &settings, &resolved[h], results + h * options.port_count,
+                               &reports[h]) != 0) {
+            exit_code = EXIT_SCAN_ERROR;
+            goto cleanup;
+        }
     }
     double duration_ms = monotonic_time_ms() - start_ms;
     bool interrupted = scan_stop_requested();
@@ -169,9 +226,9 @@ int main(int argc, char *argv[])
         }
     } else {
         if (options.json_output) {
-            print_multi_json(reports, scanned_hosts, options.target, started_at, duration_ms);
+            print_multi_json(reports, scanned_hosts, options.target, started_at, options.discover, duration_ms);
         } else {
-            print_multi_text(reports, scanned_hosts, options.open_only, duration_ms);
+            print_multi_text(reports, scanned_hosts, options.open_only, options.discover, duration_ms);
         }
         if (!any_resolved) {
             exit_code = EXIT_SCAN_ERROR;
@@ -195,6 +252,8 @@ int main(int argc, char *argv[])
 
 cleanup:
     close_service_database();
+    free(host_up);
+    free(resolved_ok);
     free(reports);
     free(results);
     free(resolved);

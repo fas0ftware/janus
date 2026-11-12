@@ -253,6 +253,84 @@ else
     echo "SKIP: IPv6 tests (no ::1 on this machine)"
 fi
 
+# ---- v1.2: host discovery (--discover) ------------------------------------------
+# The silent port (dropped SYNs) makes 127.0.0.1 look like a host that does not answer.
+# 127.0.0.2 gets an RST for the same port, so it counts as up: the two hosts show both outcomes.
+for bad_probe in 0 65536 abc "1,,2" ""; do
+    expect_exit "rejects --discover-ports '$bad_probe'" 2 "$BINARY" -t "$HOST" --discover-ports "$bad_probe"
+done
+expect_output "--discover scans a host that answers with an open probe port" "^$OPEN_PORT/tcp +open" \
+    "$BINARY" -t "$HOST" -p "$OPEN_PORT" --discover --discover-ports "$OPEN_PORT"
+expect_output "an RST on a closed probe port proves the host is up" "^$OPEN_PORT/tcp +open" \
+    "$BINARY" -t "$HOST" -p "$OPEN_PORT" --discover --discover-ports "$CLOSED_PORT"
+expect_output "--discover uses sensible default probe ports" "^$OPEN_PORT/tcp +open" \
+    "$BINARY" -t "$HOST" -p "$OPEN_PORT" --discover
+down_out="$("$BINARY" -t "$HOST" -p "$OPEN_PORT" --discover --discover-ports "$FILTERED_PORT" --timeout 300 2>&1)"
+down_exit=$?
+if [[ $down_exit -eq 0 && "$down_out" == *"Host seems down"* && "$down_out" != *"$OPEN_PORT/tcp"* ]]; then
+    pass "a silent single host is reported down and not port-scanned (exit 0)"
+else
+    fail "a silent single host is reported down and not port-scanned (exit $down_exit)"
+    sed 's/^/    | /' <<<"$down_out"
+fi
+expect_output "--discover-ports alone turns discovery on" "Host seems down" \
+    "$BINARY" -t "$HOST" -p "$OPEN_PORT" --discover-ports "$FILTERED_PORT" --timeout 300
+multi_down="$("$BINARY" -t "$HOST,127.0.0.2" -p "$OPEN_PORT" --discover-ports "$FILTERED_PORT" --timeout 300 2>&1)"
+if [[ "$multi_down" == *"Scanned 2 host(s)"*"1 up, 1 down, 0 with open ports"* && "$multi_down" != *"127.0.0.1:"* ]]; then
+    pass "down hosts are counted in the summary and skipped (even if they have open ports)"
+else
+    fail "down hosts are counted in the summary and skipped"
+    sed 's/^/    | /' <<<"$multi_down"
+fi
+discover_json="$("$BINARY" -t "$HOST,127.0.0.2,no-such-host.invalid" -p "$OPEN_PORT" --discover-ports "$FILTERED_PORT" \
+    --timeout 300 --json 2>/dev/null)"
+if python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+assert d["summary"] == {"hosts": 3, "hosts_with_open_ports": 0, "hosts_up": 1, "hosts_down": 1}, d["summary"]
+hosts = {h["target"]: h for h in d["hosts"]}
+assert hosts["127.0.0.1"]["status"] == "down" and hosts["127.0.0.1"]["ports_scanned"] == 0, hosts["127.0.0.1"]
+assert hosts["127.0.0.1"]["open_ports"] == [], hosts["127.0.0.1"]
+assert hosts["127.0.0.2"]["status"] == "up" and hosts["127.0.0.2"]["ports_scanned"] == 1, hosts["127.0.0.2"]
+assert "status" not in hosts["no-such-host.invalid"] and hosts["no-such-host.invalid"]["resolved"] is False
+' "$discover_json"; then
+    pass "discovery JSON carries per-host status and up/down counts"
+else
+    fail "discovery JSON carries per-host status and up/down counts"
+    sed 's/^/    | /' <<<"$discover_json"
+fi
+plain_json="$("$BINARY" -t "$HOST,127.0.0.2" -p "$OPEN_PORT" --json 2>/dev/null)"
+if python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+assert "hosts_up" not in d["summary"] and all("status" not in h for h in d["hosts"]), d
+' "$plain_json"; then
+    pass "without --discover the JSON has no status fields"
+else
+    fail "without --discover the JSON has no status fields"
+fi
+expect_output "--discover works on a CIDR block" "Scanned 14 host\(s\).*13 up, 1 down" \
+    "$BINARY" -t 127.0.0.0/28 -p "$OPEN_PORT" --discover-ports "$FILTERED_PORT" --timeout 300
+
+# Ctrl+C while the probes are still waiting (10 s timeout on the silent port).
+"$BINARY" -t "$HOST" -p "$OPEN_PORT" --discover-ports "$FILTERED_PORT" --timeout 10000 --threads 1 --json \
+    >"$ready_file.out" 2>/dev/null &
+janus_pid=$!
+sleep 0.5
+kill -INT "$janus_pid"
+SECONDS=0
+wait "$janus_pid"
+interrupt_exit=$?
+if [[ $interrupt_exit -eq 130 && $SECONDS -le 2 ]] &&
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["interrupted"] and "status" not in d and d["ports_scanned"] == 0, d' \
+        "$ready_file.out"; then
+    pass "Ctrl+C during discovery stops quickly and does not mark hosts down"
+else
+    fail "Ctrl+C during discovery stops quickly (exit $interrupt_exit after ${SECONDS}s)"
+    sed 's/^/    | /' "$ready_file.out"
+fi
+rm -f "$ready_file.out"
+
 # ---- summary ----------------------------------------------------------------
 echo
 echo "$passed passed, $failed failed"

@@ -94,7 +94,27 @@ counter `next_index` that says which port is next. The counter is protected by
 a **mutex**, so two threads can never take the same port. Each result is
 written by exactly one thread, into its own slot, so results need no lock.
 
-## 7. Stopping cleanly
+## 7. Skipping hosts that are down
+
+A whole subnet is mostly empty. For a silent host every port waits for the
+full timeout, so scanning 1000 ports of a host that is not there would take as
+long as the timeout allows, times the ports, divided by the threads. With
+`--discover`, Janus first runs a few connection attempts per host (default
+ports 22, 80, 443, 445 and 8080) and treats the host as **up** if any of them
+gets an answer: a SYN-ACK (open) **or** an RST (closed). A refused connection
+is still proof that a machine is there. Only hosts that stay completely silent
+are marked **down** and skipped.
+
+The probes are queued port by port across all hosts and run on the same kind of
+worker threads as the port scan. As soon as a host has answered, its remaining
+probe ports are skipped, so only the silent hosts pay for every probe.
+
+The trade-off: a real ping would use ICMP or ARP, which needs raw sockets and
+root. A TCP probe stays unprivileged, but a host that drops packets on all the
+probe ports looks the same as a host that is off. Use `--discover-ports` to
+probe the ports your devices actually use.
+
+## 8. Stopping cleanly
 
 `Ctrl+C` sends `SIGINT`. Janus' signal handler only sets an atomic flag (doing
 more inside a signal handler is unsafe). Workers check the flag before taking a

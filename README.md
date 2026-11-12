@@ -1,7 +1,7 @@
 # Janus
 
 [![CI](https://github.com/fas0ftware/janus/actions/workflows/ci.yml/badge.svg)](https://github.com/fas0ftware/janus/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.1.0-blue)
+![Version](https://img.shields.io/badge/version-1.2.0-blue)
 ![C11](https://img.shields.io/badge/C11-POSIX%20%2B%20pthreads-555)
 ![Checks](https://img.shields.io/badge/ASan%20%C2%B7%20UBSan%20%C2%B7%20TSan%20%C2%B7%20valgrind-clean-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -29,6 +29,9 @@ Named after Janus, the Roman god of gates and doorways. Ports are doors.
 - **Several targets per run:** lists (`host1,host2`) and IPv4 **CIDR blocks**
   (`192.168.1.0/24`, from /20 to /32), with `--open` to list only hosts that
   have open ports
+- **Host discovery** (`--discover`): probes all hosts in parallel first and
+  port-scans only those that answer, so a mostly empty `/24` no longer costs
+  one full timeout per port for every silent host. Works without root
 - Port lists and ranges: `80`, `22,80,443`, `1-1024`, `22,80-90,8000`, or
   `--top-ports N` for the N most commonly open ports (up to 100)
 - **Banner grabbing** (`--banner`): the first line a service sends (SSH, FTP,
@@ -68,6 +71,11 @@ Usage: janus -t <target> [options]
       --banner          read a short greeting from open ports (HTTP ports
                         get a HEAD request); nothing else is sent
       --open            with several hosts, list only hosts with open ports
+      --discover        first find which hosts answer (TCP probes, no root
+                        needed) and port-scan only those; down hosts are skipped
+      --discover-ports <list>
+                        ports to probe for --discover (default 22,80,443,445,8080);
+                        implies --discover
   -4 / -6               use only IPv4 / only IPv6 when resolving names
       --json            print the result as JSON (open ports only)
   -h, --help            show this help and exit
@@ -104,18 +112,38 @@ something open:
 $ ./janus -t 192.168.1.0/24 --top-ports 100 --timeout 300 --open
 ```
 
-Hosts are scanned one after another (ports of one host in parallel). A host
-that is down makes every port wait for the full timeout, so keep `--timeout`
-short and the port list small for whole subnets.
+Hosts are scanned one after another (ports of one host in parallel). Without
+`--discover`, a host that is down makes every port wait for the full timeout,
+so keep `--timeout` short and the port list small for whole subnets, or let
+Janus skip the silent hosts first:
+
+```console
+$ ./janus -t 192.168.1.0/24 --top-ports 100 --timeout 300 --discover
+192.168.1.1: 2 open
+PORT       STATE    SERVICE
+53/tcp     open     domain
+80/tcp     open     http
+
+192.168.1.23: no open ports
+
+Scanned 254 host(s) in 6.41 s: 2 up, 252 down, 1 with open ports
+```
+
+(Illustrative output.) Hosts that are down are counted in the summary, not
+listed. With a single host, a silent target prints `Host seems down` and exits
+with 0; run without `--discover` to scan it anyway. If your devices ignore the
+default probe ports, probe others: `--discover-ports 22,80,443,3389,5353`.
 
 JSON output, e.g. for another program to consume (with several targets the
-document has a `hosts` array instead, plus `summary.hosts_with_open_ports`):
+document has a `hosts` array instead, plus `summary.hosts_with_open_ports`; with
+`--discover` every host also gets `"status": "up"` or `"down"`, and the summary
+gains `hosts_up` and `hosts_down`):
 
 ```console
 $ ./janus -t localhost -p 22,80,443,631,8000 --json
 {
   "scanner": "janus",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "timestamp": "2026-11-11T17:55:00Z",
   "target": "localhost",
   "ip": "127.0.0.1",
@@ -181,6 +209,7 @@ src/
   cli.c/.h      getopt_long parsing, port list parser, input validation, help
   scanner.c/.h  resolve_target (IPv4/IPv6), connect_with_timeout, banners, work queue
   targets.c/.h  target lists, CIDR expansion, top-ports table
+  discovery.c/.h  --discover: parallel TCP probes that decide which hosts are up
   services.c/.h port number -> service name (getservbyport)
   output.c/.h   text table and hand-written JSON with string escaping
   utils.c/.h    error printing, monotonic clock, UTC timestamps
@@ -197,10 +226,11 @@ docs/
 ## Tests and checks
 
 `make test` runs 25 C unit checks (target lists, CIDR edge cases such as /31,
-/32 and oversized blocks, banner sanitizing) and 61 end-to-end checks against
+/32 and oversized blocks, banner sanitizing) and 76 end-to-end checks against
 local listeners: open/closed/filtered, threads, Ctrl+C, write errors, JSON,
 banners (including a listener that sends terminal escape codes), top ports,
-lists, CIDR, `--open`, unresolvable hosts in a list, IPv6 and `-4`/`-6`.
+lists, CIDR, `--open`, unresolvable hosts in a list, IPv6 and `-4`/`-6`, and
+host discovery (up, down, JSON status, Ctrl+C while probing).
 
 ![make test](docs/test-results.svg)
 
@@ -223,6 +253,9 @@ it, plus cppcheck.
   expanded); hosts are scanned one at a time
 - TCP connect scan only: every open port sees a full connection, so the
   target's logs will show it (this is intentional, Janus is not stealthy)
+- `--discover` is a TCP probe, not an ARP or ICMP ping: a host that drops every
+  packet on all probe ports looks down and is skipped. Probe more ports with
+  `--discover-ports` when that matters
 - "filtered" means "no answer in time": a slow or overloaded host can look
   filtered if the timeout is too short
 - Service names come from `/etc/services`; Janus does not talk to the service
@@ -232,11 +265,15 @@ it, plus cppcheck.
 ## Roadmap
 
 - UDP scanning
-- Scanning several hosts in parallel; skipping hosts that are down
+- Scanning the ports of several hosts in parallel
 - Integration as the scanning engine of `network-monitor` (via `--json`)
 
 ## Changelog
 
+- **1.2.0** – `--discover` / `--discover-ports`: parallel host discovery with
+  plain TCP probes (no root), hosts that do not answer are skipped, `status`,
+  `hosts_up` and `hosts_down` in the JSON output, new tests, valgrind and
+  ThreadSanitizer runs for the discovery code.
 - **1.1.0** – IPv6, `-4`/`-6`, target lists and IPv4 CIDR blocks, `--open`,
   `--top-ports`, `--banner` with sanitized output, multi-host JSON, more unit
   and end-to-end tests, GitHub Actions CI (gcc + clang, sanitizers, valgrind,

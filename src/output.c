@@ -100,6 +100,12 @@ void print_result_text(const scan_report *report)
     printf("Janus scan report for %s (%s)\n", report->target, report->ip_address);
     printf("Started: %s\n\n", report->started_at);
 
+    if (report->status == HOST_DOWN) {
+        /* No port scan was done, so there is no port summary to print. */
+        printf("Host seems down: no answer on the discovery ports. "
+               "Run without --discover to scan it anyway.\n");
+        return;
+    }
     if (counts.open == 0) {
         printf("No open ports found.\n");
     } else {
@@ -172,6 +178,9 @@ static void print_host_fields(const scan_report *report, const char *pad, const 
     printf(",\n%s\"ip\": ", pad);
     print_json_string(report->ip_address);
     printf(",\n%s\"resolved\": %s,\n", pad, report->resolved ? "true" : "false");
+    if (report->status != HOST_STATUS_UNKNOWN) {
+        printf("%s\"status\": \"%s\",\n", pad, report->status == HOST_UP ? "up" : "down");
+    }
     /* Whole milliseconds: integers are simpler for other programs to read. */
     printf("%s\"duration_ms\": %.0f,\n", pad, report->duration_ms);
     printf("%s\"ports_requested\": %zu,\n", pad, report->result_count);
@@ -223,14 +232,20 @@ void print_result_json(const scan_report *report)
     print_warnings(report, &counts);
 }
 
-void print_multi_text(const scan_report *reports, size_t count, bool open_only, double duration_ms)
+void print_multi_text(const scan_report *reports, size_t count, bool open_only, bool discovery,
+                      double duration_ms)
 {
-    size_t with_open = 0, unresolved = 0, shown = 0;
+    size_t with_open = 0, unresolved = 0, shown = 0, up = 0, down = 0;
     for (size_t h = 0; h < count; h++) {
         const scan_report *report = &reports[h];
         size_t open = report->resolved ? count_open(report) : 0;
         with_open += open > 0;
         unresolved += !report->resolved;
+        up += report->status == HOST_UP;
+        down += report->status == HOST_DOWN;
+        if (report->status == HOST_DOWN) {
+            continue; /* hosts that are down are counted in the summary, not listed */
+        }
         if (open_only && open == 0) {
             continue;
         }
@@ -253,8 +268,11 @@ void print_multi_text(const scan_report *reports, size_t count, bool open_only, 
             print_open_table(report);
         }
     }
-    printf("%sScanned %zu host(s) in %.2f s: %zu with open ports", shown ? "\n" : "", count,
-           duration_ms / 1000.0, with_open);
+    printf("%sScanned %zu host(s) in %.2f s: ", shown ? "\n" : "", count, duration_ms / 1000.0);
+    if (discovery) {
+        printf("%zu up, %zu down, ", up, down);
+    }
+    printf("%zu with open ports", with_open);
     if (unresolved > 0) {
         printf(", %zu unresolved", unresolved);
     }
@@ -262,9 +280,9 @@ void print_multi_text(const scan_report *reports, size_t count, bool open_only, 
 }
 
 void print_multi_json(const scan_report *reports, size_t count, const char *spec,
-                      const char *started_at, double duration_ms)
+                      const char *started_at, bool discovery, double duration_ms)
 {
-    size_t with_open = 0;
+    size_t with_open = 0, up = 0, down = 0;
     printf("{\n  \"scanner\": \"janus\",\n  \"version\": \"%s\",\n  \"spec\": ", JANUS_VERSION);
     print_json_string(spec);
     printf(",\n  \"timestamp\": ");
@@ -273,10 +291,16 @@ void print_multi_json(const scan_report *reports, size_t count, const char *spec
     for (size_t h = 0; h < count; h++) {
         state_counts counts = count_states(&reports[h]);
         with_open += reports[h].resolved && counts.open > 0;
+        up += reports[h].status == HOST_UP;
+        down += reports[h].status == HOST_DOWN;
         printf("%s\n    {\n", h ? "," : "");
         print_host_fields(&reports[h], "      ", &counts);
         printf("\n    }");
     }
-    printf("%s],\n  \"summary\": {\"hosts\": %zu, \"hosts_with_open_ports\": %zu}\n}\n",
-           count ? "\n  " : "", count, with_open);
+    printf("%s],\n  \"summary\": {\"hosts\": %zu, \"hosts_with_open_ports\": %zu", count ? "\n  " : "", count,
+           with_open);
+    if (discovery) {
+        printf(", \"hosts_up\": %zu, \"hosts_down\": %zu", up, down);
+    }
+    printf("}\n}\n");
 }

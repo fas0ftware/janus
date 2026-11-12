@@ -25,6 +25,9 @@ typedef struct {
     bool grab_banner; /* --banner */
     bool open_only;   /* --open: in multi-host scans, hide hosts without open ports */
     int family;       /* 0 = any, 4 = IPv4 only (-4), 6 = IPv6 only (-6) */
+    bool discover;    /* --discover: skip hosts that do not answer the probe ports */
+    uint16_t *discover_ports; /* sorted, no duplicates, heap allocated; set when discover is true */
+    size_t discover_port_count;
 } scan_options;
 
 typedef enum {

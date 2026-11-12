@@ -21,6 +21,13 @@ typedef enum {
     PORT_ERROR        /* a local error prevented the check */
 } port_state;
 
+/* Whether a host answered during --discover. */
+typedef enum {
+    HOST_STATUS_UNKNOWN, /* discovery was not run, or the host could not be resolved */
+    HOST_UP,             /* at least one probe port answered (open or closed) */
+    HOST_DOWN            /* no probe port answered: the host is skipped */
+} host_status;
+
 /* Longest banner kept per port (first line only, printable ASCII). */
 #define BANNER_SIZE 96
 
