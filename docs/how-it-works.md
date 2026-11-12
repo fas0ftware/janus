@@ -89,10 +89,17 @@ connect scan.
 ## 6. Many ports at once
 
 Most of the time is spent waiting for answers, not computing. Janus therefore
-starts several worker threads (`--threads`). They share one list of ports and a
-counter `next_index` that says which port is next. The counter is protected by
-a **mutex**, so two threads can never take the same port. Each result is
-written by exactly one thread, into its own slot, so results need no lock.
+starts several worker threads (`--threads`). They share one list of jobs, where
+a job is one port on one host, numbered host by host. A single atomic counter
+(`atomic_fetch_add`) hands out the next job number, so two threads can never
+take the same job and no mutex is needed. Each result is written by exactly one
+thread, into its own slot, so results need no lock.
+
+Because the queue spans all hosts, a `/24` with only 20 ports per host still
+keeps every thread busy; with one queue per host, 16 threads would wait on a
+20-port list and then start over for the next host. Each host counts its
+unfinished ports, and the thread that finishes the last one records how long
+the host took.
 
 ## 7. Skipping hosts that are down
 

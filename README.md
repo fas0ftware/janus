@@ -1,7 +1,7 @@
 # Janus
 
 [![CI](https://github.com/fas0ftware/janus/actions/workflows/ci.yml/badge.svg)](https://github.com/fas0ftware/janus/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.3.0-blue)
+![Version](https://img.shields.io/badge/version-1.4.0-blue)
 ![C11](https://img.shields.io/badge/C11-POSIX%20%2B%20pthreads-555)
 ![Checks](https://img.shields.io/badge/ASan%20%C2%B7%20UBSan%20%C2%B7%20TSan%20%C2%B7%20valgrind-clean-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -40,7 +40,8 @@ Named after Janus, the Roman god of gates and doorways. Ports are doors.
 - **Banner grabbing** (`--banner`): the first line a service sends (SSH, FTP,
   SMTP...), or the HTTP status line on web ports. Output is reduced to
   printable ASCII, so a hostile service cannot inject terminal escape codes
-- Parallel scanning with a pthread work queue (`--threads`, max 256)
+- Parallel scanning with one pthread worker pool shared by **all hosts and ports**
+  (`--threads`, max 256), so a `/24` with 20 ports per host keeps every thread busy
 - Service names from `/etc/services` (`22` → `ssh`)
 - Human-readable table or **JSON** output for other programs
 - Clean `Ctrl+C`: stops within ~0.1 s and prints partial results
@@ -73,7 +74,7 @@ Usage: janus -t <target> [options]
                         the 20 most common UDP ports; --top-ports takes 1-20
                         Silent ports are reported as open|filtered
       --timeout <ms>    wait per port in milliseconds, 1-60000 (default 1000)
-      --threads <n>     parallel workers, 1-256 (default 16)
+      --threads <n>     parallel workers across all hosts, 1-256 (default 16)
       --banner          read a short greeting from open ports (HTTP ports
                         get a HEAD request); nothing else is sent
       --open            with several hosts, list only hosts with open ports
@@ -118,10 +119,10 @@ something open:
 $ ./janus -t 192.168.1.0/24 --top-ports 100 --timeout 300 --open
 ```
 
-Hosts are scanned one after another (ports of one host in parallel). Without
-`--discover`, a host that is down makes every port wait for the full timeout,
-so keep `--timeout` short and the port list small for whole subnets, or let
-Janus skip the silent hosts first:
+All (host, port) pairs share one pool of `--threads` workers, started host by
+host. Without `--discover`, a host that is down makes every port wait for the
+full timeout, so keep `--timeout` short and the port list small for whole
+subnets, or let Janus skip the silent hosts first:
 
 ```console
 $ ./janus -t 192.168.1.0/24 --top-ports 100 --timeout 300 --discover
@@ -232,7 +233,7 @@ including what happens on the wire.
 src/
   main.c        entry point: parse options, resolve, scan, print, clean up
   cli.c/.h      getopt_long parsing, port list parser, input validation, help
-  scanner.c/.h  resolve_target (IPv4/IPv6), connect_with_timeout, banners, work queue
+  scanner.c/.h  resolve_target (IPv4/IPv6), connect_with_timeout, banners, global work queue
   targets.c/.h  target lists, CIDR expansion, top-ports table
   discovery.c/.h  --discover: parallel TCP probes that decide which hosts are up
   udp_scan.c/.h   --udp: datagram probes, ICMP errors via ECONNREFUSED, DNS/NTP payloads
@@ -254,8 +255,8 @@ docs/
 ## Tests and checks
 
 `make test` runs 31 C unit checks (target lists, CIDR edge cases such as /31,
-/32 and oversized blocks, banner sanitizing, UDP probe payloads) and 89 end-to-end checks against
-local listeners: open/closed/filtered, threads, Ctrl+C, write errors, JSON,
+/32 and oversized blocks, banner sanitizing, UDP probe payloads) and 93 end-to-end checks against
+local listeners: open/closed/filtered, threads (also across hosts), Ctrl+C, write errors, JSON,
 banners (including a listener that sends terminal escape codes), top ports,
 lists, CIDR, `--open`, unresolvable hosts in a list, IPv6 and `-4`/`-6`, and
 host discovery (up, down, JSON status, Ctrl+C while probing) and UDP (open,
@@ -279,9 +280,10 @@ it, plus cppcheck.
 ## Limitations
 
 - IPv6 targets must be single addresses or names (IPv6 CIDR blocks are not
-  expanded); hosts are scanned one at a time
-- TCP connect scan only: every open port sees a full connection, so the
-  target's logs will show it (this is intentional, Janus is not stealthy)
+  expanded)
+- No SYN scans or other stealth techniques: a TCP scan completes the handshake,
+  so every open port sees a full connection and the target's logs will show it
+  (this is intentional, Janus is not stealthy)
 - `--discover` is a TCP probe, not an ARP or ICMP ping: a host that drops every
   packet on all probe ports looks down and is skipped. Probe more ports with
   `--discover-ports` when that matters
@@ -299,11 +301,14 @@ it, plus cppcheck.
 ## Roadmap
 
 - More UDP service probes (mDNS, SSDP, SNMP)
-- Scanning the ports of several hosts in parallel
 - Integration as the scanning engine of `network-monitor` (via `--json`)
 
 ## Changelog
 
+- **1.4.0** – one worker pool for all hosts: `(host, port)` pairs go into a
+  single queue, so small port lists on many hosts no longer leave threads
+  idle. `duration_ms` is now measured per host. Fixed the README limitation
+  that still said "TCP only".
 - **1.3.0** – `--udp` / `-u`: unprivileged UDP scan (open, closed, open|filtered),
   DNS and NTP probes, 20 common UDP ports by default, `protocol` and
   `open_filtered_ports` in the JSON output, UDP listeners in the tests.
