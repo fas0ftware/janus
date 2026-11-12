@@ -136,9 +136,13 @@ and sends one datagram. Then it waits:
   probe and a firewall that drops it look exactly the same
 
 Because UDP packets get lost, the probe is sent twice inside the timeout.
-Most services only answer a correctly formed request, so DNS (53) and NTP (123)
-get a minimal query; every other port gets an empty datagram, which is enough
-to make a *closed* port answer with ICMP but rarely makes an open one talk.
+Most services only answer a correctly formed request, so a few well-known
+discovery services get their standard query: DNS (53), NTP (123), the NetBIOS
+name service (137, a "node status" request), SSDP (1900, an `M-SEARCH`) and
+mDNS (5353, a PTR query for `_services._dns-sd._udp.local`). Every other port
+gets an empty datagram, which is enough to make a *closed* port answer with
+ICMP but rarely makes an open one talk. SNMP is left out on purpose: a useful
+SNMP probe needs a community string, and Janus does not guess credentials.
 
 Linux limits how fast it sends ICMP errors (`icmp_ratelimit`, roughly one per
 second per remote host). Against a remote host a fast scan can lose some of

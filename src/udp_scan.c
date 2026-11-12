@@ -17,18 +17,65 @@
 #define UDP_ATTEMPTS 2
 #define NTP_PACKET_SIZE 48
 
+/* Largest probe datagram; the buffer in scan_udp_port() has this size. */
+#define UDP_PAYLOAD_MAX 128
+
+/* DNS: ID 0x1234, "recursion desired", one question: "." type NS, class IN. */
+static const unsigned char dns_query[] = {0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+                                          0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01};
+
+/*
+ * mDNS (legacy unicast query, RFC 6762 section 6.7): one question,
+ * "_services._dns-sd._udp.local" type PTR class IN. Responders answer with the
+ * list of service types they offer (printers, Chromecasts, AirPlay, ...).
+ */
+static const unsigned char mdns_query[] = {
+    0x12, 0x34, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* header */
+    9,    '_',  's',  'e',  'r',  'v',  'i',  'c',  'e',  's',
+    7,    '_',  'd',  'n',  's',  '-',  's',  'd',
+    4,    '_',  'u',  'd',  'p',
+    5,    'l',  'o',  'c',  'a',  'l',  0x00,
+    0x00, 0x0c, 0x00, 0x01, /* type PTR, class IN */
+};
+
+/* SSDP / UPnP discovery request, the same one routers and media servers expect. */
+static const char ssdp_search[] = "M-SEARCH * HTTP/1.1\r\n"
+                                  "HOST: 239.255.255.250:1900\r\n"
+                                  "MAN: \"ssdp:discover\"\r\n"
+                                  "MX: 1\r\n"
+                                  "ST: ssdp:all\r\n"
+                                  "\r\n";
+
+/*
+ * NetBIOS name service "node status" request (NBSTAT) for the wildcard name "*".
+ * The name is half-ASCII encoded: '*' followed by 15 NUL bytes becomes "CK" + 30 times 'A'.
+ */
+static const unsigned char netbios_status[] = {
+    0x12, 0x34, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* header */
+    0x20,                                                                   /* name length: 32 */
+    'C',  'K', /* encoded '*' */
+    'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A',
+    'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A',
+    'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A',
+    0x00,                   /* end of name */
+    0x00, 0x21, 0x00, 0x01, /* type NBSTAT, class IN */
+};
+
+/* Copy a fixed probe into buffer, or write nothing (and return 0) if it does not fit. */
+static size_t copy_probe(const void *probe, size_t probe_length, unsigned char *buffer, size_t buffer_size)
+{
+    if (buffer_size < probe_length) {
+        return 0;
+    }
+    memcpy(buffer, probe, probe_length);
+    return probe_length;
+}
+
 size_t udp_probe_payload(uint16_t port, unsigned char *buffer, size_t buffer_size)
 {
-    /* DNS: ID 0x1234, "recursion desired", one question: "." type NS, class IN. */
-    static const unsigned char dns_query[] = {0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-                                              0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01};
     switch (port) {
     case 53:
-        if (buffer_size < sizeof dns_query) {
-            return 0;
-        }
-        memcpy(buffer, dns_query, sizeof dns_query);
-        return sizeof dns_query;
+        return copy_probe(dns_query, sizeof dns_query, buffer, buffer_size);
     case 123:
         /* NTP: first byte 0x1b = leap 0, version 3, mode 3 (client); the rest is zero. */
         if (buffer_size < NTP_PACKET_SIZE) {
@@ -37,8 +84,19 @@ size_t udp_probe_payload(uint16_t port, unsigned char *buffer, size_t buffer_siz
         memset(buffer, 0, NTP_PACKET_SIZE);
         buffer[0] = 0x1b;
         return NTP_PACKET_SIZE;
+    case 137:
+        return copy_probe(netbios_status, sizeof netbios_status, buffer, buffer_size);
+    case 1900:
+        return copy_probe(ssdp_search, sizeof ssdp_search - 1, buffer, buffer_size); /* without the NUL */
+    case 5353:
+        return copy_probe(mdns_query, sizeof mdns_query, buffer, buffer_size);
     default:
-        return 0; /* an empty datagram is enough to trigger an ICMP error on a closed port */
+        /*
+         * An empty datagram is enough to make a closed port answer with ICMP. Other services
+         * (SNMP needs a community string, for example) are deliberately not probed: Janus
+         * sends no guessed credentials.
+         */
+        return 0;
     }
 }
 
@@ -96,7 +154,7 @@ port_result scan_udp_port(const scan_target *target, uint16_t port, const scan_s
         return finish(result, classify_udp_error(saved), saved);
     }
 
-    unsigned char payload[NTP_PACKET_SIZE];
+    unsigned char payload[UDP_PAYLOAD_MAX];
     size_t payload_length = udp_probe_payload(port, payload, sizeof payload);
 
     int attempt_ms = settings->timeout_ms / UDP_ATTEMPTS;

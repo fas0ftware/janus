@@ -20,6 +20,7 @@ EVIL_PORT=29821     # greets with terminal escape codes
 UDP_REPLY_PORT=29830  # UDP: answers every datagram
 UDP_SILENT_PORT=29831 # UDP: receives but never answers
 UDP_CLOSED_PORT=29832 # UDP: nothing listens here
+UDP_PAYLOAD_PORT=29833 # UDP: answers only non-empty datagrams
 passed=0
 failed=0
 
@@ -72,19 +73,24 @@ python3 "$TESTS_DIR/udp_listener.py" "$HOST" "$UDP_REPLY_PORT" reply "$udp_ready
 udp_reply_pid=$!
 python3 "$TESTS_DIR/udp_listener.py" "$HOST" "$UDP_SILENT_PORT" silent "$udp_ready.silent" &
 udp_silent_pid=$!
+python3 "$TESTS_DIR/udp_listener.py" "$HOST" "$UDP_PAYLOAD_PORT" payload "$udp_ready.payload" &
+udp_payload_pid=$!
+# SSDP's real port, if it is free on this machine (otherwise the SSDP probe test is skipped).
+python3 "$TESTS_DIR/udp_listener.py" "$HOST" 1900 payload "$udp_ready.ssdp" 2>/dev/null &
+udp_ssdp_pid=$!
 v6_pid=""
 if python3 -c 'import socket; s=socket.socket(socket.AF_INET6); s.bind(("::1", 0))' 2>/dev/null; then
     python3 "$TESTS_DIR/banner_listener.py" "::1" "$BANNER_PORT" 'SSH-2.0-V6\r\n' &
     v6_pid=$!
 fi
-trap 'kill "$server_pid" "$filtered_pid" "$banner_pid" "$evil_pid" "$udp_reply_pid" "$udp_silent_pid" $v6_pid 2>/dev/null; rm -f "$ready_file" "$udp_ready.reply" "$udp_ready.silent"' EXIT
+trap 'kill "$server_pid" "$filtered_pid" "$banner_pid" "$evil_pid" "$udp_reply_pid" "$udp_silent_pid" "$udp_payload_pid" "$udp_ssdp_pid" $v6_pid 2>/dev/null; rm -f "$ready_file" "$udp_ready".*' EXIT
 
 wait_for_port "$OPEN_PORT" || { echo "listener on $OPEN_PORT did not start"; exit 1; }
 wait_for_port "$BANNER_PORT" || { echo "listener on $BANNER_PORT did not start"; exit 1; }
 wait_for_port "$EVIL_PORT" || { echo "listener on $EVIL_PORT did not start"; exit 1; }
 for _ in $(seq 30); do [[ -f "$ready_file" ]] && break; sleep 0.1; done
-for _ in $(seq 30); do [[ -f "$udp_ready.reply" && -f "$udp_ready.silent" ]] && break; sleep 0.1; done
-[[ -f "$udp_ready.reply" && -f "$udp_ready.silent" ]] || { echo "UDP listeners did not start"; exit 1; }
+for _ in $(seq 30); do [[ -f "$udp_ready.reply" && -f "$udp_ready.silent" && -f "$udp_ready.payload" ]] && break; sleep 0.1; done
+[[ -f "$udp_ready.reply" && -f "$udp_ready.silent" && -f "$udp_ready.payload" ]] || { echo "UDP listeners did not start"; exit 1; }
 
 # ---- command-line validation ------------------------------------------------
 expect_exit "--help exits with 0" 0 "$BINARY" --help
@@ -374,6 +380,15 @@ assert d["protocol"] == "tcp" and "open_filtered_ports" not in d and "open_filte
     pass "TCP JSON says protocol tcp and has no UDP-only keys"
 else
     fail "TCP JSON says protocol tcp and has no UDP-only keys"
+fi
+# Most real services ignore an empty datagram. Janus sends a real probe only to well-known ports.
+expect_output "--udp: an empty probe does not wake a service that needs a real request" \
+    "^$UDP_PAYLOAD_PORT/udp +open\|filtered" "$BINARY" -t "$HOST" --udp -p "$UDP_PAYLOAD_PORT" --timeout 300
+if [[ -f "$udp_ready.ssdp" ]]; then
+    expect_output "--udp: the SSDP port gets a real M-SEARCH probe and answers" "^1900/udp +open +[a-z]" \
+        "$BINARY" -t "$HOST" --udp -p 1900 --timeout 400
+else
+    echo "SKIP: SSDP probe test (UDP port 1900 is in use on this machine)"
 fi
 expect_exit "--udp with --banner is a usage error" 2 "$BINARY" -t "$HOST" --udp --banner
 expect_exit "--udp --top-ports above the UDP table is a usage error" 2 "$BINARY" -t "$HOST" --udp --top-ports 21
