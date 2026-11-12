@@ -29,4 +29,8 @@ void free_targets(target_list *list);
 #define TOP_PORTS_MAX 100
 extern const uint16_t top_ports[TOP_PORTS_MAX];
 
+/* The most commonly open UDP ports (used by --udp), most common first. */
+#define UDP_TOP_PORTS_MAX 20
+extern const uint16_t udp_top_ports[UDP_TOP_PORTS_MAX];
+
 #endif /* JANUS_TARGETS_H */

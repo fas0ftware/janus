@@ -10,6 +10,7 @@
 /* How many ports ended up in each state. */
 typedef struct {
     size_t open;
+    size_t open_filtered; /* UDP only */
     size_t closed;
     size_t filtered;
     size_t error;
@@ -19,11 +20,14 @@ typedef struct {
 
 static state_counts count_states(const scan_report *report)
 {
-    state_counts counts = {0, 0, 0, 0, 0, 0};
+    state_counts counts = {0, 0, 0, 0, 0, 0, 0};
     for (size_t i = 0; i < report->result_count; i++) {
         switch (report->results[i].state) {
         case PORT_OPEN:
             counts.open++;
+            break;
+        case PORT_OPEN_FILTERED:
+            counts.open_filtered++;
             break;
         case PORT_CLOSED:
             counts.closed++;
@@ -58,37 +62,59 @@ static void print_warnings(const scan_report *report, const state_counts *counts
     }
 }
 
-size_t count_open(const scan_report *report)
+static size_t count_in_state(const scan_report *report, port_state state)
 {
-    size_t open = 0;
+    size_t total = 0;
     for (size_t i = 0; i < report->result_count; i++) {
-        open += report->results[i].state == PORT_OPEN;
+        total += report->results[i].state == state;
     }
-    return open;
+    return total;
 }
 
-/* Table of open ports; adds a BANNER column when --banner was given. */
+size_t count_open(const scan_report *report)
+{
+    return count_in_state(report, PORT_OPEN);
+}
+
+size_t count_open_filtered(const scan_report *report)
+{
+    return count_in_state(report, PORT_OPEN_FILTERED);
+}
+
+static const char *protocol_name(const scan_report *report)
+{
+    return report->protocol == PROTOCOL_UDP ? "udp" : "tcp";
+}
+
+/*
+ * Table of open ports (and, for UDP, open|filtered ones); adds a BANNER column
+ * when --banner was given. The UDP state "open|filtered" needs a wider column.
+ */
 static void print_open_table(const scan_report *report)
 {
+    const char *protocol = protocol_name(report);
+    int state_width = report->protocol == PROTOCOL_UDP ? 14 : 8;
+
     /* %-10s pads to 10 columns, left aligned, so columns line up. */
     if (report->show_banner) {
-        printf("%-10s %-8s %-16s %s\n", "PORT", "STATE", "SERVICE", "BANNER");
+        printf("%-10s %-*s %-16s %s\n", "PORT", state_width, "STATE", "SERVICE", "BANNER");
     } else {
-        printf("%-10s %-8s %s\n", "PORT", "STATE", "SERVICE");
+        printf("%-10s %-*s %s\n", "PORT", state_width, "STATE", "SERVICE");
     }
     for (size_t i = 0; i < report->result_count; i++) {
         const port_result *result = &report->results[i];
-        if (result->state != PORT_OPEN) {
+        if (result->state != PORT_OPEN && result->state != PORT_OPEN_FILTERED) {
             continue;
         }
         char port_label[16];
-        snprintf(port_label, sizeof port_label, "%u/tcp", (unsigned)result->port);
+        snprintf(port_label, sizeof port_label, "%u/%s", (unsigned)result->port, protocol);
+        const char *state_text = port_state_to_string(result->state);
         if (report->show_banner) {
-            printf("%-10s %-8s %-16s %s\n", port_label, port_state_to_string(result->state),
-                   lookup_service_name(result->port), result->banner[0] ? result->banner : "-");
+            printf("%-10s %-*s %-16s %s\n", port_label, state_width, state_text,
+                   lookup_service_name(result->port, protocol), result->banner[0] ? result->banner : "-");
         } else {
-            printf("%-10s %-8s %s\n", port_label, port_state_to_string(result->state),
-                   lookup_service_name(result->port));
+            printf("%-10s %-*s %s\n", port_label, state_width, state_text,
+                   lookup_service_name(result->port, protocol));
         }
     }
 }
@@ -106,15 +132,18 @@ void print_result_text(const scan_report *report)
                "Run without --discover to scan it anyway.\n");
         return;
     }
-    if (counts.open == 0) {
+    if (counts.open + counts.open_filtered == 0) {
         printf("No open ports found.\n");
     } else {
         print_open_table(report);
     }
 
-    printf("\nScanned %zu port(s) in %.2f s: %zu open, %zu closed, %zu filtered",
-           report->result_count - counts.not_scanned, report->duration_ms / 1000.0,
-           counts.open, counts.closed, counts.filtered);
+    printf("\nScanned %zu port(s) in %.2f s: %zu open, ", report->result_count - counts.not_scanned,
+           report->duration_ms / 1000.0, counts.open);
+    if (report->protocol == PROTOCOL_UDP) {
+        printf("%zu open|filtered, ", counts.open_filtered);
+    }
+    printf("%zu closed, %zu filtered", counts.closed, counts.filtered);
     if (counts.error > 0) {
         printf(", %zu error", counts.error);
     }
@@ -170,35 +199,22 @@ static void print_json_string(const char *text)
     putchar('"');
 }
 
-/* The per-host keys, shared by the single-host and multi-host documents. */
-static void print_host_fields(const scan_report *report, const char *pad, const state_counts *counts)
+/* One JSON array of the ports in a given state, e.g. "open_ports": [ {...}, {...} ], with a trailing comma. */
+static void print_port_array(const scan_report *report, const char *pad, const char *key, port_state wanted)
 {
-    printf("%s\"target\": ", pad);
-    print_json_string(report->target);
-    printf(",\n%s\"ip\": ", pad);
-    print_json_string(report->ip_address);
-    printf(",\n%s\"resolved\": %s,\n", pad, report->resolved ? "true" : "false");
-    if (report->status != HOST_STATUS_UNKNOWN) {
-        printf("%s\"status\": \"%s\",\n", pad, report->status == HOST_UP ? "up" : "down");
-    }
-    /* Whole milliseconds: integers are simpler for other programs to read. */
-    printf("%s\"duration_ms\": %.0f,\n", pad, report->duration_ms);
-    printf("%s\"ports_requested\": %zu,\n", pad, report->result_count);
-    printf("%s\"ports_scanned\": %zu,\n", pad, report->result_count - counts->not_scanned);
-    printf("%s\"interrupted\": %s,\n", pad, report->interrupted ? "true" : "false");
-
-    printf("%s\"open_ports\": [", pad);
+    const char *protocol = protocol_name(report);
+    printf("%s\"%s\": [", pad, key);
     bool first = true;
     for (size_t i = 0; i < report->result_count; i++) {
         const port_result *result = &report->results[i];
-        if (result->state != PORT_OPEN) {
+        if (result->state != wanted) {
             continue;
         }
         /* JSON does not allow a trailing comma, so print it before each item but the first. */
-        printf("%s\n%s  {\"port\": %u, \"protocol\": \"tcp\", \"service\": ", first ? "" : ",", pad,
-               (unsigned)result->port);
-        print_json_string(lookup_service_name(result->port));
-        if (report->show_banner) {
+        printf("%s\n%s  {\"port\": %u, \"protocol\": \"%s\", \"service\": ", first ? "" : ",", pad,
+               (unsigned)result->port, protocol);
+        print_json_string(lookup_service_name(result->port, protocol));
+        if (wanted == PORT_OPEN && report->show_banner) {
             printf(", \"banner\": ");
             print_json_string(result->banner);
         }
@@ -210,10 +226,37 @@ static void print_host_fields(const scan_report *report, const char *pad, const 
     } else {
         printf("\n%s],\n", pad);
     }
+}
 
-    printf("%s\"summary\": {\"open\": %zu, \"closed\": %zu, \"filtered\": %zu, "
-           "\"error\": %zu, \"not_scanned\": %zu}",
-           pad, counts->open, counts->closed, counts->filtered, counts->error, counts->not_scanned);
+/* The per-host keys, shared by the single-host and multi-host documents. */
+static void print_host_fields(const scan_report *report, const char *pad, const state_counts *counts)
+{
+    printf("%s\"target\": ", pad);
+    print_json_string(report->target);
+    printf(",\n%s\"ip\": ", pad);
+    print_json_string(report->ip_address);
+    printf(",\n%s\"protocol\": \"%s\",\n", pad, protocol_name(report));
+    printf("%s\"resolved\": %s,\n", pad, report->resolved ? "true" : "false");
+    if (report->status != HOST_STATUS_UNKNOWN) {
+        printf("%s\"status\": \"%s\",\n", pad, report->status == HOST_UP ? "up" : "down");
+    }
+    /* Whole milliseconds: integers are simpler for other programs to read. */
+    printf("%s\"duration_ms\": %.0f,\n", pad, report->duration_ms);
+    printf("%s\"ports_requested\": %zu,\n", pad, report->result_count);
+    printf("%s\"ports_scanned\": %zu,\n", pad, report->result_count - counts->not_scanned);
+    printf("%s\"interrupted\": %s,\n", pad, report->interrupted ? "true" : "false");
+
+    print_port_array(report, pad, "open_ports", PORT_OPEN);
+    if (report->protocol == PROTOCOL_UDP) {
+        print_port_array(report, pad, "open_filtered_ports", PORT_OPEN_FILTERED);
+    }
+
+    printf("%s\"summary\": {\"open\": %zu, ", pad, counts->open);
+    if (report->protocol == PROTOCOL_UDP) {
+        printf("\"open_filtered\": %zu, ", counts->open_filtered);
+    }
+    printf("\"closed\": %zu, \"filtered\": %zu, \"error\": %zu, \"not_scanned\": %zu}", counts->closed,
+           counts->filtered, counts->error, counts->not_scanned);
 }
 
 void print_result_json(const scan_report *report)
@@ -239,6 +282,7 @@ void print_multi_text(const scan_report *reports, size_t count, bool open_only, 
     for (size_t h = 0; h < count; h++) {
         const scan_report *report = &reports[h];
         size_t open = report->resolved ? count_open(report) : 0;
+        size_t uncertain = report->resolved ? count_open_filtered(report) : 0; /* UDP: silent ports */
         with_open += open > 0;
         unresolved += !report->resolved;
         up += report->status == HOST_UP;
@@ -246,7 +290,7 @@ void print_multi_text(const scan_report *reports, size_t count, bool open_only, 
         if (report->status == HOST_DOWN) {
             continue; /* hosts that are down are counted in the summary, not listed */
         }
-        if (open_only && open == 0) {
+        if (open_only && open == 0 && uncertain == 0) {
             continue;
         }
         if (shown++ > 0) {
@@ -261,10 +305,14 @@ void print_multi_text(const scan_report *reports, size_t count, bool open_only, 
         } else {
             printf("%s (%s): ", report->target, report->ip_address);
         }
-        if (open == 0) {
+        if (open == 0 && uncertain == 0) {
             printf("no open ports\n");
         } else {
-            printf("%zu open\n", open);
+            printf("%zu open", open);
+            if (uncertain > 0) {
+                printf(", %zu open|filtered", uncertain);
+            }
+            printf("\n");
             print_open_table(report);
         }
     }

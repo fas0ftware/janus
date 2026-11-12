@@ -29,7 +29,7 @@ enum {
 void print_usage(FILE *stream, const char *program_name)
 {
     fprintf(stream,
-            "Janus %s - TCP connect port scanner\n"
+            "Janus %s - TCP connect and UDP port scanner\n"
             "\n"
             "Usage: %s -t <target> [options]\n"
             "\n"
@@ -38,6 +38,9 @@ void print_usage(FILE *stream, const char *program_name)
             "                        CIDR block /%d-/32, e.g. 192.168.1.0/24 (required)\n"
             "  -p, --ports <list>    ports: 80 | 22,80,443 | 1-1024 | 22,80-90 (default %s)\n"
             "      --top-ports <n>   the n most common ports, 1-%d (instead of -p)\n"
+            "  -u, --udp             scan UDP instead of TCP (no root needed). Default ports:\n"
+            "                        the %d most common UDP ports; --top-ports takes 1-%d\n"
+            "                        Silent ports are reported as open|filtered\n"
             "      --timeout <ms>    wait per port in milliseconds, %d-%d (default %d)\n"
             "      --threads <n>     parallel workers, 1-%d (default %d)\n"
             "      --banner          read a short greeting from open ports (HTTP ports\n"
@@ -56,7 +59,7 @@ void print_usage(FILE *stream, const char *program_name)
             "WARNING: Authorized use only. Scan only systems you own or have\n"
             "explicit permission to test. Unauthorized scanning may be illegal.\n",
             JANUS_VERSION, program_name, MIN_CIDR_PREFIX, DEFAULT_PORTS, TOP_PORTS_MAX,
-            MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, DEFAULT_TIMEOUT_MS,
+            UDP_TOP_PORTS_MAX, UDP_TOP_PORTS_MAX, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, DEFAULT_TIMEOUT_MS,
             MAX_THREAD_COUNT, DEFAULT_THREAD_COUNT, DEFAULT_DISCOVER_PORTS);
 }
 
@@ -215,6 +218,7 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
     const char *port_text = DEFAULT_PORTS;
     bool ports_given = false;
     const char *discover_port_text = DEFAULT_DISCOVER_PORTS;
+    const char *top_text = NULL;
     int top_count = 0;
 
     options->target = NULL;
@@ -226,6 +230,7 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
     options->grab_banner = false;
     options->open_only = false;
     options->family = 0;
+    options->udp = false;
     options->discover = false;
     options->discover_ports = NULL;
     options->discover_port_count = 0;
@@ -238,6 +243,7 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
         {"json", no_argument, NULL, OPTION_JSON},
         {"top-ports", required_argument, NULL, OPTION_TOP_PORTS},
         {"banner", no_argument, NULL, OPTION_BANNER},
+        {"udp", no_argument, NULL, 'u'},
         {"open", no_argument, NULL, OPTION_OPEN},
         {"discover", no_argument, NULL, OPTION_DISCOVER},
         {"discover-ports", required_argument, NULL, OPTION_DISCOVER_PORTS},
@@ -248,7 +254,7 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
 
     /* Leading ':' lets us print our own message for a missing argument. */
     int option;
-    while ((option = getopt_long(argc, argv, ":t:p:hv46", long_options, NULL)) != -1) {
+    while ((option = getopt_long(argc, argv, ":t:p:hv46u", long_options, NULL)) != -1) {
         switch (option) {
         case 't':
             options->target = optarg;
@@ -258,10 +264,10 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
             ports_given = true;
             break;
         case OPTION_TOP_PORTS:
-            if (parse_bounded_int(optarg, 1, TOP_PORTS_MAX, &top_count) != 0) {
-                print_error("invalid --top-ports '%s' (expected 1-%d)", optarg, TOP_PORTS_MAX);
-                return PARSE_ERROR;
-            }
+            top_text = optarg; /* checked after the loop: the limit depends on --udp */
+            break;
+        case 'u':
+            options->udp = true;
             break;
         case OPTION_BANNER:
             options->grab_banner = true;
@@ -337,17 +343,32 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
         return PARSE_ERROR;
     }
 
+    if (options->udp && options->grab_banner) {
+        print_error("--banner works only with TCP scans");
+        return PARSE_ERROR;
+    }
+
+    int top_limit = options->udp ? UDP_TOP_PORTS_MAX : TOP_PORTS_MAX;
+    if (top_text != NULL && parse_bounded_int(top_text, 1, top_limit, &top_count) != 0) {
+        print_error("invalid --top-ports '%s' (expected 1-%d%s)", top_text, top_limit,
+                    options->udp ? " for UDP" : "");
+        return PARSE_ERROR;
+    }
     if (ports_given && top_count > 0) {
         print_error("use either -p or --top-ports, not both");
         return PARSE_ERROR;
     }
+    if (options->udp && !ports_given && top_count == 0) {
+        top_count = UDP_TOP_PORTS_MAX; /* 1-1024 over UDP would be slow and mostly silent */
+    }
     if (top_count > 0) {
         /* Reuse the list parser's sort and de-duplication through a text list. */
+        const uint16_t *table = options->udp ? udp_top_ports : top_ports;
         char list[TOP_PORTS_MAX * 7];
         size_t used = 0;
         for (int i = 0; i < top_count; i++) {
             used += (size_t)snprintf(list + used, sizeof list - used, "%s%u", i ? "," : "",
-                                     (unsigned)top_ports[i]);
+                                     (unsigned)table[i]);
         }
         return parse_port_list(list, &options->ports, &options->port_count) == 0 ? PARSE_OK
                                                                                  : PARSE_ERROR;

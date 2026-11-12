@@ -1,13 +1,13 @@
 # Janus
 
 [![CI](https://github.com/fas0ftware/janus/actions/workflows/ci.yml/badge.svg)](https://github.com/fas0ftware/janus/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.2.0-blue)
+![Version](https://img.shields.io/badge/version-1.3.0-blue)
 ![C11](https://img.shields.io/badge/C11-POSIX%20%2B%20pthreads-555)
 ![Checks](https://img.shields.io/badge/ASan%20%C2%B7%20UBSan%20%C2%B7%20TSan%20%C2%B7%20valgrind-clean-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-A small, dependency-free **TCP connect port scanner** for Linux, written in C11
-with plain POSIX sockets and pthreads.
+A small, dependency-free **TCP connect and UDP port scanner** for Linux, written
+in C11 with plain POSIX sockets and pthreads.
 
 ![Janus 1.1: banners, CIDR and IPv6](docs/demo.svg)
 
@@ -24,6 +24,9 @@ Named after Janus, the Roman god of gates and doorways. Ports are doors.
 ## Features
 
 - Full TCP connect scan: **open**, **closed** and **filtered** (timeout) detection
+- **UDP scan** (`--udp`, no root): a reply means **open**, an ICMP "port
+  unreachable" means **closed**, silence means **open|filtered**. DNS and NTP
+  get a real query so they answer; the default is the 20 most common UDP ports
 - Non-blocking `connect()` + `poll()` with a per-port timeout
 - **IPv4 and IPv6** (`-4` / `-6` to force a family when resolving names)
 - **Several targets per run:** lists (`host1,host2`) and IPv4 **CIDR blocks**
@@ -66,6 +69,9 @@ Usage: janus -t <target> [options]
                         CIDR block /20-/32, e.g. 192.168.1.0/24 (required)
   -p, --ports <list>    ports: 80 | 22,80,443 | 1-1024 | 22,80-90 (default 1-1024)
       --top-ports <n>   the n most common ports, 1-100 (instead of -p)
+  -u, --udp             scan UDP instead of TCP (no root needed). Default ports:
+                        the 20 most common UDP ports; --top-ports takes 1-20
+                        Silent ports are reported as open|filtered
       --timeout <ms>    wait per port in milliseconds, 1-60000 (default 1000)
       --threads <n>     parallel workers, 1-256 (default 16)
       --banner          read a short greeting from open ports (HTTP ports
@@ -134,10 +140,28 @@ listed. With a single host, a silent target prints `Host seems down` and exits
 with 0; run without `--discover` to scan it anyway. If your devices ignore the
 default probe ports, probe others: `--discover-ports 22,80,443,3389,5353`.
 
+UDP scan of your own machine or router (silent ports show as `open|filtered`):
+
+```console
+$ ./janus -t 192.168.1.1 --udp --timeout 500
+```
+
+```text
+PORT       STATE          SERVICE
+53/udp     open           domain
+1900/udp   open|filtered  unknown
+```
+
+(Illustrative output.) UDP is connectionless, so Janus can only be certain
+about a port when something answers (open) or the kernel reports an ICMP
+error (closed). A service that ignores Janus' probe looks the same as a
+firewall that drops it: both are `open|filtered`.
+
 JSON output, e.g. for another program to consume (with several targets the
 document has a `hosts` array instead, plus `summary.hosts_with_open_ports`; with
 `--discover` every host also gets `"status": "up"` or `"down"`, and the summary
-gains `hosts_up` and `hosts_down`):
+gains `hosts_up` and `hosts_down`). Every document says `"protocol": "tcp"` or
+`"udp"`; UDP scans add an `open_filtered_ports` array and `summary.open_filtered`:
 
 ```console
 $ ./janus -t localhost -p 22,80,443,631,8000 --json
@@ -147,6 +171,7 @@ $ ./janus -t localhost -p 22,80,443,631,8000 --json
   "timestamp": "2026-11-11T17:55:00Z",
   "target": "localhost",
   "ip": "127.0.0.1",
+  "protocol": "tcp",
   "resolved": true,
   "duration_ms": 0,
   "ports_requested": 5,
@@ -210,6 +235,7 @@ src/
   scanner.c/.h  resolve_target (IPv4/IPv6), connect_with_timeout, banners, work queue
   targets.c/.h  target lists, CIDR expansion, top-ports table
   discovery.c/.h  --discover: parallel TCP probes that decide which hosts are up
+  udp_scan.c/.h   --udp: datagram probes, ICMP errors via ECONNREFUSED, DNS/NTP payloads
   services.c/.h port number -> service name (getservbyport)
   output.c/.h   text table and hand-written JSON with string escaping
   utils.c/.h    error printing, monotonic clock, UTC timestamps
@@ -217,6 +243,8 @@ tests/
   run_tests.sh          end-to-end tests against local listeners
   filtered_listener.py  simulates a filtered port without root
   banner_listener.py    greets clients with a banner (also hostile escape codes)
+  udp_listener.py       UDP listener that answers or stays silent
+  test_udp.c            unit tests: UDP probe payloads
   test_json_escape.c    unit test for JSON string escaping
   test_targets.c        unit tests: lists, CIDR edge cases, banner sanitizing
 docs/
@@ -225,12 +253,13 @@ docs/
 
 ## Tests and checks
 
-`make test` runs 25 C unit checks (target lists, CIDR edge cases such as /31,
-/32 and oversized blocks, banner sanitizing) and 76 end-to-end checks against
+`make test` runs 31 C unit checks (target lists, CIDR edge cases such as /31,
+/32 and oversized blocks, banner sanitizing, UDP probe payloads) and 89 end-to-end checks against
 local listeners: open/closed/filtered, threads, Ctrl+C, write errors, JSON,
 banners (including a listener that sends terminal escape codes), top ports,
 lists, CIDR, `--open`, unresolvable hosts in a list, IPv6 and `-4`/`-6`, and
-host discovery (up, down, JSON status, Ctrl+C while probing).
+host discovery (up, down, JSON status, Ctrl+C while probing) and UDP (open,
+closed, open|filtered, JSON, Ctrl+C).
 
 ![make test](docs/test-results.svg)
 
@@ -256,6 +285,11 @@ it, plus cppcheck.
 - `--discover` is a TCP probe, not an ARP or ICMP ping: a host that drops every
   packet on all probe ports looks down and is skipped. Probe more ports with
   `--discover-ports` when that matters
+- UDP: most services ignore an empty datagram, so many open UDP ports show up
+  as `open|filtered`. Only DNS and NTP get a protocol-specific probe. Linux
+  also rate-limits ICMP errors (about one per second per remote host), so a
+  fast UDP scan of a *remote* host can report closed ports as `open|filtered`
+  (localhost is exempt). Use a longer `--timeout` and fewer `--threads` there
 - "filtered" means "no answer in time": a slow or overloaded host can look
   filtered if the timeout is too short
 - Service names come from `/etc/services`; Janus does not talk to the service
@@ -264,12 +298,15 @@ it, plus cppcheck.
 
 ## Roadmap
 
-- UDP scanning
+- More UDP service probes (mDNS, SSDP, SNMP)
 - Scanning the ports of several hosts in parallel
 - Integration as the scanning engine of `network-monitor` (via `--json`)
 
 ## Changelog
 
+- **1.3.0** – `--udp` / `-u`: unprivileged UDP scan (open, closed, open|filtered),
+  DNS and NTP probes, 20 common UDP ports by default, `protocol` and
+  `open_filtered_ports` in the JSON output, UDP listeners in the tests.
 - **1.2.0** – `--discover` / `--discover-ports`: parallel host discovery with
   plain TCP probes (no root), hosts that do not answer are skipped, `status`,
   `hosts_up` and `hosts_down` in the JSON output, new tests, valgrind and

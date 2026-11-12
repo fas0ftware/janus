@@ -20,6 +20,7 @@ typedef struct {
     bool show_banner; /* --banner was given */
     bool resolved;    /* false if the host could not be resolved (multi-host runs) */
     host_status status; /* result of --discover; HOST_STATUS_UNKNOWN if it was not used */
+    scan_protocol protocol; /* tcp or udp: decides labels, the state column and JSON keys */
 } scan_report;
 
 /* Human-readable table of open ports plus a summary line. */
@@ -43,5 +44,8 @@ void print_multi_json(const scan_report *reports, size_t count, const char *spec
 
 /* Number of open ports in a report. */
 size_t count_open(const scan_report *report);
+
+/* Number of UDP ports that stayed silent (open|filtered); always 0 for TCP. */
+size_t count_open_filtered(const scan_report *report);
 
 #endif /* JANUS_OUTPUT_H */
