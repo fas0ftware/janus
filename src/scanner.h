@@ -57,6 +57,26 @@ int resolve_target(const char *host, address_family family, scan_target *target)
 port_result scan_port(const scan_target *target, uint16_t port, const scan_settings *settings);
 
 /*
+ * One host in a multi-host scan. target == NULL means "skip" (e.g. the name
+ * could not be resolved). finished_ms is filled in: the monotonic time when
+ * the last of this host's ports was done (0 if none was scanned).
+ */
+typedef struct {
+    const scan_target *target;
+    port_result *results; /* ports_per_host entries, each .port set */
+    double finished_ms;
+} host_job;
+
+/*
+ * Scan all hosts with ONE shared pool of thread_count workers. The work queue
+ * holds every (host, port) pair, so with a CIDR block the workers are never
+ * idle waiting for a single slow host: silent addresses are probed in
+ * parallel instead of one after another. Returns 0, or -1 on a setup error.
+ */
+int scan_hosts(host_job *hosts, size_t host_count, size_t ports_per_host,
+               const scan_settings *settings);
+
+/*
  * Scan every port in results[0..count-1] (each .port must be set).
  * Each entry's state is filled in. Returns 0, or -1 on a setup error.
  */

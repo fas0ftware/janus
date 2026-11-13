@@ -7,6 +7,7 @@
 #include <poll.h>       /* poll, struct pollfd */
 #include <pthread.h>    /* pthread_create, pthread_join, pthread_mutex_* */
 #include <stdatomic.h>  /* atomic_bool, atomic_load, atomic_store */
+#include <stdint.h>     /* SIZE_MAX */
 #include <stdbool.h>    /* bool */
 #include <stdio.h>      /* snprintf */
 #include <stdlib.h>     /* calloc, free */
@@ -319,23 +320,25 @@ port_result scan_port(const scan_target *target, uint16_t port, const scan_setti
 }
 
 /*
- * Shared work queue. All workers read from the same list of ports;
- * next_index says which port is handed out next. Several threads touch
- * next_index, so it is only read or changed while holding 'lock'.
+ * Shared work queue. All workers read from the same list of (host, port)
+ * pairs; next_index says which pair is handed out next. Several threads touch
+ * next_index and each host's finished_ms, so they are only read or changed
+ * while holding 'lock'.
  */
 typedef struct {
-    const scan_target *target;
-    port_result *results; /* each worker writes only the slots it claimed */
-    size_t count;
+    host_job *hosts;
+    size_t host_count;
+    size_t ports_per_host;
     const scan_settings *settings;
     size_t next_index; /* protected by lock */
     pthread_mutex_t lock;
 } work_queue;
 
-/* Hand out the next unscanned index. Returns false when the work is done. */
+/* Hand out the next unscanned (host, port) pair. Returns false when the work is done. */
 static bool take_next_index(work_queue *queue, size_t *index_out)
 {
     bool has_work = false;
+    size_t total = queue->host_count * queue->ports_per_host;
 
     if (scan_stop_requested()) {
         return false; /* Ctrl+C: do not start any new port */
@@ -344,41 +347,62 @@ static bool take_next_index(work_queue *queue, size_t *index_out)
         return false; /* cannot happen with a valid mutex; stop this worker */
     }
     /* Only one thread at a time can be between lock and unlock. */
-    if (queue->next_index < queue->count) {
-        *index_out = queue->next_index;
-        queue->next_index++;
-        has_work = true;
+    while (queue->next_index < total) {
+        size_t index = queue->next_index++;
+        if (queue->hosts[index / queue->ports_per_host].target != NULL) {
+            *index_out = index;
+            has_work = true;
+            break;
+        }
+        /* unresolved host: skip all of its ports at once */
+        queue->next_index = (index / queue->ports_per_host + 1) * queue->ports_per_host;
     }
     pthread_mutex_unlock(&queue->lock);
 
     return has_work;
 }
 
-/* Thread body: keep taking ports from the queue until it is empty. */
+/* Thread body: keep taking (host, port) pairs from the queue until it is empty. */
 static void *scan_worker(void *argument)
 {
     work_queue *queue = argument;
     size_t index;
 
     while (take_next_index(queue, &index)) {
-        /* No lock needed here: no other thread ever gets this same index. */
-        queue->results[index] = scan_port(queue->target, queue->results[index].port,
-                                          queue->settings);
+        host_job *host = &queue->hosts[index / queue->ports_per_host];
+        port_result *slot = &host->results[index % queue->ports_per_host];
+        /* No lock needed here: no other thread ever gets this same slot. */
+        *slot = scan_port(host->target, slot->port, queue->settings);
+
+        double now = monotonic_time_ms();
+        if (pthread_mutex_lock(&queue->lock) == 0) {
+            if (now > host->finished_ms) {
+                host->finished_ms = now;
+            }
+            pthread_mutex_unlock(&queue->lock);
+        }
     }
     return NULL;
 }
 
-int scan_port_range(const scan_target *target, port_result *results, size_t count,
-                    const scan_settings *settings)
+int scan_hosts(host_job *hosts, size_t host_count, size_t ports_per_host,
+               const scan_settings *settings)
 {
-    if (count == 0) {
+    for (size_t h = 0; h < host_count; h++) {
+        hosts[h].finished_ms = 0.0;
+    }
+    if (host_count == 0 || ports_per_host == 0) {
         return 0;
+    }
+    if (host_count > SIZE_MAX / ports_per_host) {
+        print_error("too many hosts x ports");
+        return -1;
     }
 
     work_queue queue = {
-        .target = target,
-        .results = results,
-        .count = count,
+        .hosts = hosts,
+        .host_count = host_count,
+        .ports_per_host = ports_per_host,
         .settings = settings,
         .next_index = 0,
     };
@@ -387,8 +411,9 @@ int scan_port_range(const scan_target *target, port_result *results, size_t coun
         return -1;
     }
 
-    /* More threads than ports would only sit idle. */
-    size_t wanted = (size_t)settings->thread_count < count ? (size_t)settings->thread_count : count;
+    /* More threads than (host, port) pairs would only sit idle. */
+    size_t total = host_count * ports_per_host;
+    size_t wanted = (size_t)settings->thread_count < total ? (size_t)settings->thread_count : total;
     pthread_t *threads = calloc(wanted, sizeof *threads);
     if (threads == NULL) {
         print_error("out of memory");
@@ -423,6 +448,13 @@ int scan_port_range(const scan_target *target, port_result *results, size_t coun
     free(threads);
     pthread_mutex_destroy(&queue.lock);
     return 0;
+}
+
+int scan_port_range(const scan_target *target, port_result *results, size_t count,
+                    const scan_settings *settings)
+{
+    host_job job = {.target = target, .results = results, .finished_ms = 0.0};
+    return scan_hosts(&job, 1, count, settings);
 }
 
 const char *port_state_to_string(port_state state)

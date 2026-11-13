@@ -54,9 +54,9 @@ static int install_signal_handlers(void)
     return 0;
 }
 
-/* One host: resolve, scan, fill *report. *target_out keeps the IP text alive. */
-static int scan_one_host(const char *host, const scan_options *options, const scan_settings *settings,
-                         scan_target *target_out, port_result *results, scan_report *report)
+/* One host: prepare its results and report, then resolve it. Returns 0 if resolved. */
+static int prepare_host(const char *host, const scan_options *options, scan_target *target_out,
+                        port_result *results, scan_report *report)
 {
     for (size_t i = 0; i < options->port_count; i++) {
         memset(&results[i], 0, sizeof results[i]);
@@ -84,13 +84,6 @@ static int scan_one_host(const char *host, const scan_options *options, const sc
     }
     report->ip_address = target_out->ip_text;
     report->resolved = true;
-
-    double start_ms = monotonic_time_ms();
-    if (scan_port_range(target_out, results, options->port_count, settings) != 0) {
-        return -2;
-    }
-    report->duration_ms = monotonic_time_ms() - start_ms;
-    report->interrupted = scan_stop_requested();
     return 0;
 }
 
@@ -111,6 +104,7 @@ int main(int argc, char *argv[])
     scan_target *resolved = NULL;
     port_result *results = NULL;
     scan_report *reports = NULL;
+    host_job *jobs = NULL;
 
     if (expand_targets(options.target, &targets) != 0) {
         free_options(&options);
@@ -141,18 +135,41 @@ int main(int argc, char *argv[])
         started_at[0] = '\0';
     }
 
+    /*
+     * Resolve every target first, then scan all of them with one shared
+     * worker pool: a block of silent addresses is probed in parallel instead
+     * of one host after another.
+     */
     double start_ms = monotonic_time_ms();
     size_t scanned_hosts = 0;
     bool any_resolved = false;
+    jobs = calloc(targets.count, sizeof *jobs);
+    if (jobs == NULL) {
+        print_error("out of memory");
+        exit_code = EXIT_SCAN_ERROR;
+        goto cleanup;
+    }
     for (size_t h = 0; h < targets.count && !scan_stop_requested(); h++) {
-        int result = scan_one_host(targets.hosts[h], &options, &settings, &resolved[h],
-                                   results + h * options.port_count, &reports[h]);
-        scanned_hosts++;
-        if (result == -2) {
-            exit_code = EXIT_SCAN_ERROR;
-            goto cleanup;
+        port_result *block = results + h * options.port_count;
+        if (prepare_host(targets.hosts[h], &options, &resolved[h], block, &reports[h]) == 0) {
+            jobs[h].target = &resolved[h];
+            any_resolved = true;
         }
-        any_resolved |= result == 0;
+        jobs[h].results = block;
+        scanned_hosts++;
+    }
+    double scan_start_ms = monotonic_time_ms();
+    if (scan_hosts(jobs, scanned_hosts, options.port_count, &settings) != 0) {
+        exit_code = EXIT_SCAN_ERROR;
+        goto cleanup;
+    }
+    for (size_t h = 0; h < scanned_hosts; h++) {
+        if (reports[h].resolved) {
+            /* Hosts run side by side: each one's time runs from the scan start to its last port. */
+            double finished = jobs[h].finished_ms > 0.0 ? jobs[h].finished_ms : scan_start_ms;
+            reports[h].duration_ms = finished - scan_start_ms;
+            reports[h].interrupted = scan_stop_requested();
+        }
     }
     double duration_ms = monotonic_time_ms() - start_ms;
     bool interrupted = scan_stop_requested();
@@ -195,6 +212,7 @@ int main(int argc, char *argv[])
 
 cleanup:
     close_service_database();
+    free(jobs);
     free(reports);
     free(results);
     free(resolved);

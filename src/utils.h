@@ -3,7 +3,7 @@
 
 #include <stddef.h> /* size_t */
 
-#define JANUS_VERSION "1.1.0"
+#define JANUS_VERSION "1.2.0"
 
 /* Print "janus: <message>" to stderr, printf-style. */
 void print_error(const char *format, ...);

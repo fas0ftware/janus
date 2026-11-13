@@ -1,7 +1,7 @@
 # Janus
 
 [![CI](https://github.com/fas0ftware/janus/actions/workflows/ci.yml/badge.svg)](https://github.com/fas0ftware/janus/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.1.0-blue)
+![Version](https://img.shields.io/badge/version-1.2.0-blue)
 ![C11](https://img.shields.io/badge/C11-POSIX%20%2B%20pthreads-555)
 ![Checks](https://img.shields.io/badge/ASan%20%C2%B7%20UBSan%20%C2%B7%20TSan%20%C2%B7%20valgrind-clean-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -115,7 +115,7 @@ document has a `hosts` array instead, plus `summary.hosts_with_open_ports`):
 $ ./janus -t localhost -p 22,80,443,631,8000 --json
 {
   "scanner": "janus",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "timestamp": "2026-11-11T17:55:00Z",
   "target": "localhost",
   "ip": "127.0.0.1",
@@ -236,6 +236,11 @@ it, plus cppcheck.
 - Integration as the scanning engine of `network-monitor` (via `--json`)
 
 ## Changelog
+
+- **1.2.0** – Several targets are scanned with one shared worker pool over all
+  (host, port) pairs, so silent hosts are probed in parallel: a /24 sweep of
+  30 ports drops from about 100 s to about 12 s (`--threads 256`). Unresolvable
+  names are still reported and skipped. New end-to-end test for it.
 
 - **1.1.0** – IPv6, `-4`/`-6`, target lists and IPv4 CIDR blocks, `--open`,
   `--top-ports`, `--banner` with sanitized output, multi-host JSON, more unit

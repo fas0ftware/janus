@@ -94,6 +94,14 @@ counter `next_index` that says which port is next. The counter is protected by
 a **mutex**, so two threads can never take the same port. Each result is
 written by exactly one thread, into its own slot, so results need no lock.
 
+With several targets (a list or a CIDR block) the list holds every
+**(host, port) pair**, and one pool of threads works through all of it. Silent
+addresses therefore wait for their timeouts side by side instead of one host
+after another: a /24 with 30 ports and a 400 ms timeout takes about 12 s with
+256 threads, where scanning host by host took about 100 s. In multi-host JSON,
+each host's `duration_ms` is the time from the start of the scan until its
+last port was done.
+
 ## 7. Stopping cleanly
 
 `Ctrl+C` sends `SIGINT`. Janus' signal handler only sets an atomic flag (doing

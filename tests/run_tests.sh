@@ -107,6 +107,16 @@ expect_output "list and range are combined without duplicates" "3 port\(s\).*1 o
 expect_output "host names are resolved" "\($HOST\)" "$BINARY" -t localhost -p "$OPEN_PORT"
 
 # ---- threads ----------------------------------------------------------------
+# Several hosts share one worker pool: two silent targets must be probed at the
+# same time, not one after the other (2 x 1500 ms would be 3 s).
+start_ns=$(date +%s%N)
+multi_out="$("$BINARY" -t "$HOST,localhost" -p "$FILTERED_PORT" --timeout 1500 --threads 4 --json 2>&1)"
+elapsed_ms=$(( ($(date +%s%N) - start_ns) / 1000000 ))
+if [[ $(grep -c "\"filtered\": 1" <<<"$multi_out") -eq 2 && $elapsed_ms -lt 2600 ]]; then
+    pass "hosts are scanned in parallel (${elapsed_ms} ms for 2 x 1500 ms timeouts)"
+else
+    fail "hosts are scanned in parallel (${elapsed_ms} ms, output: $multi_out)"
+fi
 range="$((OPEN_PORT - 20))-$((OPEN_PORT + 9))" # 30 ports, one of them open
 expect_output "1 thread scans the range" "30 port\(s\).*1 open, 29 closed" \
     "$BINARY" -t "$HOST" -p "$range" --threads 1
