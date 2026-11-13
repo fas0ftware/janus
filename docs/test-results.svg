@@ -1,64 +1,53 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1090" viewBox="0 0 720 1090">
+<svg xmlns="http://www.w3.org/2000/svg" width="826" height="892" viewBox="0 0 826 892">
 <rect width="100%" height="100%" rx="10" fill="#0d1117" stroke="#30363d"/>
 <rect width="100%" height="32" rx="10" fill="#161b22"/><rect y="22" width="100%" height="10" fill="#161b22"/>
 <circle cx="18" cy="16" r="6" fill="#ff5f56"/><circle cx="38" cy="16" r="6" fill="#ffbd2e"/><circle cx="58" cy="16" r="6" fill="#27c93f"/>
-<text x="360" y="21" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12" text-anchor="middle">janus — make test (unit + end-to-end)</text>
+<text x="413" y="21" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12" text-anchor="middle">janus — make test</text>
 <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13" xml:space="preserve">
 <text x="14" y="56" fill="#58a6ff">$ make test</text>
-<text x="14" y="74" fill="#e6edf3">janus: CIDR block &#x27;10.0.0.0/19&#x27; is too large: use /20 to /32 (at most 4096 hosts)</text>
-<text x="14" y="92" fill="#e6edf3">janus: invalid prefix in &#x27;10.0.0.0/33&#x27; (IPv4 prefixes are 0-32)</text>
-<text x="14" y="110" fill="#e6edf3">janus: invalid prefix in &#x27;10.0.0.0/&#x27;</text>
-<text x="14" y="128" fill="#e6edf3">janus: invalid prefix in &#x27;10.0.0.0/2x&#x27;</text>
-<text x="14" y="146" fill="#e6edf3">janus: invalid prefix in &#x27;10.0.0.0/-1&#x27;</text>
-<text x="14" y="164" fill="#e6edf3">janus: invalid CIDR block &#x27;300.0.0.0/24&#x27; (only IPv4 blocks are supported)</text>
-<text x="14" y="182" fill="#e6edf3">janus: invalid CIDR block &#x27;fe80::/64&#x27; (only IPv4 blocks are supported)</text>
-<text x="14" y="200" fill="#e6edf3">janus: empty or too long target in &#x27;a,,b&#x27;</text>
-<text x="14" y="218" fill="#e6edf3">janus: too many targets (at most 4096 hosts per run)</text>
-<text x="14" y="236" fill="#3fb950">PASS: single host</text>
-<text x="14" y="254" fill="#3fb950">PASS: list without duplicates</text>
-<text x="14" y="272" fill="#3fb950">PASS: /24 skips network and broadcast</text>
-<text x="14" y="290" fill="#3fb950">PASS: host bits are ignored</text>
-<text x="14" y="308" fill="#3fb950">PASS: /30 has two hosts</text>
-<text x="14" y="326" fill="#3fb950">PASS: /31 keeps both addresses</text>
-<text x="14" y="344" fill="#3fb950">PASS: /32 is one host</text>
-<text x="14" y="362" fill="#3fb950">PASS: /20 is the largest block</text>
-<text x="14" y="380" fill="#3fb950">PASS: IPv6 literal in a list</text>
-<text x="14" y="398" fill="#3fb950">PASS: rejects blocks larger than /20</text>
-<text x="14" y="416" fill="#3fb950">PASS: rejects prefix 33</text>
-<text x="14" y="434" fill="#3fb950">PASS: rejects empty prefix</text>
-<text x="14" y="452" fill="#3fb950">PASS: rejects non-digit prefix</text>
-<text x="14" y="470" fill="#3fb950">PASS: rejects negative prefix</text>
-<text x="14" y="488" fill="#3fb950">PASS: rejects bad address</text>
-<text x="14" y="506" fill="#3fb950">PASS: rejects IPv6 CIDR</text>
-<text x="14" y="524" fill="#3fb950">PASS: rejects empty list item</text>
-<text x="14" y="542" fill="#3fb950">PASS: rejects more than 4096 hosts in total</text>
-<text x="14" y="560" fill="#e6edf3">... (41 lines omitted) ...</text>
-<text x="14" y="578" fill="#3fb950">PASS: 8 threads give the same result</text>
-<text x="14" y="596" fill="#3fb950">PASS: more threads than ports is fine</text>
-<text x="14" y="614" fill="#3fb950">PASS: Ctrl+C stops the scan quickly with exit code 130 and partial JSON</text>
-<text x="14" y="632" fill="#f85149">PASS: write error on stdout is reported</text>
-<text x="14" y="650" fill="#3fb950">PASS: JSON output is valid and complete</text>
-<text x="14" y="668" fill="#3fb950">PASS: JSON with no open ports is valid</text>
-<text x="14" y="686" fill="#3fb950">PASS: JSON string escaping round-trips</text>
-<text x="14" y="704" fill="#3fb950">PASS: --banner shows the service greeting</text>
-<text x="14" y="722" fill="#3fb950">PASS: --banner never prints terminal escape codes</text>
-<text x="14" y="740" fill="#3fb950">PASS: JSON carries sanitized banners</text>
-<text x="14" y="758" fill="#3fb950">PASS: --top-ports 20 scans 20 ports</text>
-<text x="14" y="776" fill="#f85149">PASS: --top-ports and -p together are a usage error</text>
-<text x="14" y="794" fill="#3fb950">PASS: rejects --top-ports &#x27;0&#x27;</text>
-<text x="14" y="812" fill="#3fb950">PASS: rejects --top-ports &#x27;101&#x27;</text>
-<text x="14" y="830" fill="#3fb950">PASS: rejects --top-ports &#x27;x&#x27;</text>
-<text x="14" y="848" fill="#f85149">PASS: -4 and -6 together are a usage error</text>
-<text x="14" y="866" fill="#f85149">PASS: CIDR larger than /20 is a usage error</text>
-<text x="14" y="884" fill="#f85149">PASS: IPv6 CIDR is a usage error</text>
-<text x="14" y="902" fill="#3fb950">PASS: a list of hosts is scanned host by host</text>
-<text x="14" y="920" fill="#3fb950">PASS: CIDR blocks expand to hosts</text>
-<text x="14" y="938" fill="#3fb950">PASS: --open hides hosts without open ports</text>
-<text x="14" y="956" fill="#3fb950">PASS: unresolvable hosts are reported, not fatal, in a list</text>
-<text x="14" y="974" fill="#3fb950">PASS: multi-host JSON is valid and complete</text>
-<text x="14" y="992" fill="#3fb950">PASS: IPv6 literal is scanned</text>
-<text x="14" y="1010" fill="#3fb950">PASS: -6 resolves localhost to ::1</text>
-<text x="14" y="1028" fill="#3fb950">PASS: -4 resolves localhost to 127.0.0.1</text>
-<text x="14" y="1046" fill="#e6edf3"></text>
-<text x="14" y="1064" fill="#3fb950">61 passed, 0 failed</text>
+<text x="14" y="74" fill="#3fb950">PASS: single host</text>
+<text x="14" y="92" fill="#3fb950">PASS: list without duplicates</text>
+<text x="14" y="110" fill="#3fb950">PASS: /24 skips network and broadcast</text>
+<text x="14" y="128" fill="#3fb950">PASS: host bits are ignored</text>
+<text x="14" y="146" fill="#3fb950">PASS: /30 has two hosts</text>
+<text x="14" y="164" fill="#3fb950">PASS: /31 keeps both addresses</text>
+<text x="14" y="182" fill="#3fb950">PASS: /32 is one host</text>
+<text x="14" y="200" fill="#3fb950">PASS: /20 is the largest block</text>
+<text x="14" y="218" fill="#3fb950">PASS: IPv6 literal in a list</text>
+<text x="14" y="236" fill="#8b949e">   … 92 more lines …</text>
+<text x="14" y="254" fill="#3fb950">PASS: rejects --discover-ports &#x27;65536&#x27;</text>
+<text x="14" y="272" fill="#3fb950">PASS: rejects --discover-ports &#x27;abc&#x27;</text>
+<text x="14" y="290" fill="#3fb950">PASS: rejects --discover-ports &#x27;1,,2&#x27;</text>
+<text x="14" y="308" fill="#3fb950">PASS: rejects --discover-ports &#x27;&#x27;</text>
+<text x="14" y="326" fill="#3fb950">PASS: --discover scans a host that answers with an open probe port</text>
+<text x="14" y="344" fill="#3fb950">PASS: an RST on a closed probe port proves the host is up</text>
+<text x="14" y="362" fill="#3fb950">PASS: --discover uses sensible default probe ports</text>
+<text x="14" y="380" fill="#3fb950">PASS: a silent single host is reported down and not port-scanned (exit 0)</text>
+<text x="14" y="398" fill="#3fb950">PASS: --discover-ports alone turns discovery on</text>
+<text x="14" y="416" fill="#3fb950">PASS: down hosts are counted in the summary and skipped (even if they have open ports)</text>
+<text x="14" y="434" fill="#3fb950">PASS: discovery JSON carries per-host status and up/down counts</text>
+<text x="14" y="452" fill="#3fb950">PASS: without --discover the JSON has no status fields</text>
+<text x="14" y="470" fill="#3fb950">PASS: --discover works on a CIDR block</text>
+<text x="14" y="488" fill="#3fb950">PASS: Ctrl+C during discovery stops quickly and does not mark hosts down</text>
+<text x="14" y="506" fill="#3fb950">PASS: --udp: a port that answers is open</text>
+<text x="14" y="524" fill="#3fb950">PASS: --udp: no listener means closed (ICMP port unreachable)</text>
+<text x="14" y="542" fill="#3fb950">PASS: --udp: a listener that stays silent is open|filtered</text>
+<text x="14" y="560" fill="#3fb950">PASS: -u is the short form of --udp</text>
+<text x="14" y="578" fill="#3fb950">PASS: UDP JSON has protocol, open_ports, open_filtered_ports and counts</text>
+<text x="14" y="596" fill="#3fb950">PASS: TCP JSON says protocol tcp and has no UDP-only keys</text>
+<text x="14" y="614" fill="#3fb950">PASS: --udp: an empty probe does not wake a service that needs a real request</text>
+<text x="14" y="632" fill="#3fb950">PASS: --udp: the SSDP port gets a real M-SEARCH probe and answers</text>
+<text x="14" y="650" fill="#3fb950">PASS: --udp with --banner is a usage error</text>
+<text x="14" y="668" fill="#3fb950">PASS: --udp --top-ports above the UDP table is a usage error</text>
+<text x="14" y="686" fill="#3fb950">PASS: --udp --top-ports 5 scans 5 ports</text>
+<text x="14" y="704" fill="#3fb950">PASS: --udp without ports scans the common UDP ports</text>
+<text x="14" y="722" fill="#3fb950">PASS: --udp works on several hosts</text>
+<text x="14" y="740" fill="#3fb950">PASS: --udp combines with --discover (TCP probes, UDP scan)</text>
+<text x="14" y="758" fill="#3fb950">PASS: Ctrl+C stops a UDP scan quickly with exit code 130</text>
+<text x="14" y="776" fill="#3fb950">PASS: hosts with few ports are scanned in parallel (1010 ms for 3 hosts x 1 s)</text>
+<text x="14" y="794" fill="#3fb950">PASS: per-host duration_ms is measured per host, not for the whole run</text>
+<text x="14" y="812" fill="#3fb950">PASS: many hosts with a few ports each give complete results</text>
+<text x="14" y="830" fill="#3fb950">PASS: Ctrl+C stops a multi-host scan quickly with exit code 130</text>
+<text x="14" y="848" fill="#e6edf3"></text>
+<text x="14" y="866" fill="#3fb950">95 passed, 0 failed</text>
 </g></svg>
