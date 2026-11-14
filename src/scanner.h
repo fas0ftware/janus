@@ -12,6 +12,8 @@
 #include <stddef.h>     /* size_t */
 #include <stdint.h>     /* uint16_t */
 
+#include "fingerprint.h" /* service_info */
+
 /* Possible results of scanning one port. */
 typedef enum {
     PORT_NOT_SCANNED, /* scan was stopped before reaching this port */
@@ -41,6 +43,13 @@ typedef struct {
     port_state state;
     int error_code;           /* errno value when state == PORT_ERROR, otherwise 0 */
     char banner[BANNER_SIZE]; /* "" unless --banner found one on an open port */
+    /*
+     * --sv: what the port really runs, or NULL if nothing was recognized.
+     * Heap allocated only for identified open ports (most ports are closed, so
+     * a /20 scan does not carry 4096 x ports empty records); release with
+     * free_port_details().
+     */
+    service_info *detected;
 } port_result;
 
 /* Which address family resolve_target may return. */
@@ -59,6 +68,7 @@ typedef struct {
     int timeout_ms;
     int thread_count;
     bool grab_banner; /* read a short greeting from open ports (TCP only) */
+    bool detect_version; /* --sv: probe open ports to identify service and version */
     scan_protocol protocol;
 } scan_settings;
 
@@ -95,6 +105,21 @@ int scan_port_range(const scan_target *target, port_result *results, size_t coun
 int scan_host_ports(const scan_target *targets, const bool *scan_host, size_t host_count,
                     port_result *results, size_t ports_per_host, const scan_settings *settings,
                     double *host_ms);
+
+/* Release the --sv details of results[0..count-1] and set them to NULL. NULL results is fine. */
+void free_port_details(port_result *results, size_t count);
+
+/*
+ * Open a TCP connection to target:port within timeout_ms. Returns the
+ * connected (non-blocking) socket, or -1 if the port did not accept.
+ */
+int connect_tcp_port(const scan_target *target, uint16_t port, int timeout_ms);
+
+/* Wait until fd is readable or deadline_ms (monotonic clock) passes; reacts to Ctrl+C. */
+bool wait_for_data(int fd, double deadline_ms);
+
+/* Ports where services wait for the client to speak HTTP first. */
+bool is_http_port(uint16_t port);
 
 /*
  * Keep the first line of raw service output as printable ASCII (other bytes

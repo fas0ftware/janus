@@ -21,6 +21,10 @@ UDP_REPLY_PORT=29830  # UDP: answers every datagram
 UDP_SILENT_PORT=29831 # UDP: receives but never answers
 UDP_CLOSED_PORT=29832 # UDP: nothing listens here
 UDP_PAYLOAD_PORT=29833 # UDP: answers only non-empty datagrams
+SV_TLS_PORT=29840     # --sv: a real TLS server (needs the openssl command for its certificate)
+SV_REDIS_PORT=29841   # --sv: answers any request like Redis answers an unknown command
+SV_MYSQL_PORT=29842   # --sv: sends a MariaDB handshake greeting
+SV_SILENT_PORT=29843  # --sv: accepts, reads, never answers
 passed=0
 failed=0
 
@@ -83,11 +87,29 @@ if python3 -c 'import socket; s=socket.socket(socket.AF_INET6); s.bind(("::1", 0
     python3 "$TESTS_DIR/banner_listener.py" "::1" "$BANNER_PORT" 'SSH-2.0-V6\r\n' &
     v6_pid=$!
 fi
-trap 'kill "$server_pid" "$filtered_pid" "$banner_pid" "$evil_pid" "$udp_reply_pid" "$udp_silent_pid" "$udp_payload_pid" "$udp_ssdp_pid" $v6_pid 2>/dev/null; rm -f "$ready_file" "$udp_ready".*' EXIT
+python3 "$TESTS_DIR/service_listener.py" "$HOST" "$SV_REDIS_PORT" reply "-ERR unknown command 'HEAD'\r\n" &
+sv_redis_pid=$!
+python3 "$TESTS_DIR/banner_listener.py" "$HOST" "$SV_MYSQL_PORT" \
+    '\x30\x00\x00\x00\x0a5.5.5-10.11.6-MariaDB-0+deb12u1\x00\x2a\x00\x00\x00' &
+sv_mysql_pid=$!
+python3 "$TESTS_DIR/service_listener.py" "$HOST" "$SV_SILENT_PORT" silent &
+sv_silent_pid=$!
+cert_dir="$(mktemp -d)"
+sv_tls_pid=""
+if command -v openssl >/dev/null &&
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost \
+        -keyout "$cert_dir/key.pem" -out "$cert_dir/cert.pem" >/dev/null 2>&1; then
+    python3 "$TESTS_DIR/service_listener.py" "$HOST" "$SV_TLS_PORT" tls "$cert_dir/cert.pem" "$cert_dir/key.pem" &
+    sv_tls_pid=$!
+fi
+trap 'kill "$server_pid" "$filtered_pid" "$banner_pid" "$evil_pid" "$udp_reply_pid" "$udp_silent_pid" "$udp_payload_pid" "$udp_ssdp_pid" "$sv_redis_pid" "$sv_mysql_pid" "$sv_silent_pid" $sv_tls_pid $v6_pid 2>/dev/null; rm -f "$ready_file" "$udp_ready".*; rm -rf "$cert_dir"' EXIT
 
 wait_for_port "$OPEN_PORT" || { echo "listener on $OPEN_PORT did not start"; exit 1; }
 wait_for_port "$BANNER_PORT" || { echo "listener on $BANNER_PORT did not start"; exit 1; }
 wait_for_port "$EVIL_PORT" || { echo "listener on $EVIL_PORT did not start"; exit 1; }
+for sv_port in "$SV_REDIS_PORT" "$SV_MYSQL_PORT" "$SV_SILENT_PORT" ${sv_tls_pid:+"$SV_TLS_PORT"}; do
+    wait_for_port "$sv_port" || { echo "listener on $sv_port did not start"; exit 1; }
+done
 for _ in $(seq 30); do [[ -f "$ready_file" ]] && break; sleep 0.1; done
 for _ in $(seq 30); do [[ -f "$udp_ready.reply" && -f "$udp_ready.silent" && -f "$udp_ready.payload" ]] && break; sleep 0.1; done
 [[ -f "$udp_ready.reply" && -f "$udp_ready.silent" && -f "$udp_ready.payload" ]] || { echo "UDP listeners did not start"; exit 1; }
@@ -465,6 +487,86 @@ else
     sed 's/^/    | /' "$ready_file.err"
 fi
 rm -f "$ready_file.out" "$ready_file.err"
+
+# ---- v1.6: service and version detection (--sv) ---------------------------------
+expect_output "--sv: SSH greeting gives product and version" "^$BANNER_PORT/tcp +open +ssh +JanusTest 1\.0$" \
+    "$BINARY" -t "$HOST" -p "$BANNER_PORT" --sv
+expect_output "--sv: HTTP on an unusual port is found and named" "^$OPEN_PORT/tcp +open +http +SimpleHTTP 0\.6 \(Python/" \
+    "$BINARY" -t "$HOST" -p "$OPEN_PORT" --sv
+if [[ -n "$sv_tls_pid" ]]; then
+    expect_output "--sv: TLS server shows protocol version and cipher" "^$SV_TLS_PORT/tcp +open +tls +TLS 1\.[23], [A-Z]" \
+        "$BINARY" -t "$HOST" -p "$SV_TLS_PORT" --sv
+else
+    echo "SKIP: TLS detection test (no openssl command to make a certificate)"
+fi
+expect_output "--sv: Redis is recognized by its reply to HEAD" "^$SV_REDIS_PORT/tcp +open +redis +Redis$" \
+    "$BINARY" -t "$HOST" -p "$SV_REDIS_PORT" --sv
+expect_output "--sv: MariaDB version comes from the handshake" "^$SV_MYSQL_PORT/tcp +open +mysql +MariaDB 10\.11\.6 \(0\+deb12u1\)$" \
+    "$BINARY" -t "$HOST" -p "$SV_MYSQL_PORT" --sv
+start_ns=$(date +%s%N)
+expect_output "--sv: a silent unknown service stays unknown" "^$SV_SILENT_PORT/tcp +open +unknown +-$" \
+    "$BINARY" -t "$HOST" -p "$SV_SILENT_PORT" --sv --timeout 300
+elapsed_ms=$(( ($(date +%s%N) - start_ns) / 1000000 ))
+if (( elapsed_ms < 1500 )); then
+    pass "--sv: a silent port costs three short waits, not more (${elapsed_ms} ms at --timeout 300)"
+else
+    fail "--sv: a silent port costs three short waits (${elapsed_ms} ms at --timeout 300)"
+fi
+expect_output "--sv: closed ports are not probed" "0 open, 1 closed" "$BINARY" -t "$HOST" -p "$CLOSED_PORT" --sv
+expect_output "--sv with --banner shows the banner under the port" "^ +banner: SSH-2\.0-JanusTest_1\.0$" \
+    "$BINARY" -t "$HOST" -p "$BANNER_PORT" --sv --banner
+sv_evil_out="$("$BINARY" -t "$HOST" -p "$EVIL_PORT" --sv --banner 2>&1)"
+if [[ "$sv_evil_out" != *$'\x1b'* && "$sv_evil_out" != *$'\x07'* && "$sv_evil_out" == *"$EVIL_PORT/tcp"* ]]; then
+    pass "--sv never prints terminal escape codes"
+else
+    fail "--sv never prints terminal escape codes"
+fi
+sv_json="$("$BINARY" -t localhost -p "$BANNER_PORT,$OPEN_PORT,$SV_MYSQL_PORT,$SV_SILENT_PORT,$CLOSED_PORT" --sv --timeout 300 --json 2>/dev/null)"
+if python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+ports = {p["port"]: p for p in d["open_ports"]}
+ssh, http, mysql, silent = (ports[int(x)] for x in sys.argv[2:6])
+assert ssh["detected"] == {"service": "ssh", "product": "JanusTest", "version": "1.0", "info": ""}, ssh
+assert http["detected"]["service"] == "http" and http["detected"]["product"] == "SimpleHTTP", http
+assert mysql["detected"]["product"] == "MariaDB" and mysql["detected"]["version"] == "10.11.6", mysql
+assert silent["detected"] is None, silent
+assert all("service" in p and "banner" not in p for p in d["open_ports"]), d
+' "$sv_json" "$BANNER_PORT" "$OPEN_PORT" "$SV_MYSQL_PORT" "$SV_SILENT_PORT"; then
+    pass "--sv JSON has a detected object per open port (null if unknown)"
+else
+    fail "--sv JSON has a detected object per open port (null if unknown)"
+    sed 's/^/    | /' <<<"$sv_json"
+fi
+if python3 -c 'import json,sys; assert all("detected" not in p for p in json.loads(sys.argv[1])["open_ports"])' \
+    "$("$BINARY" -t "$HOST" -p "$BANNER_PORT" --json 2>/dev/null)"; then
+    pass "without --sv the JSON has no detected key"
+else
+    fail "without --sv the JSON has no detected key"
+fi
+expect_output "--service-version is the long form of --sv" "ssh +JanusTest 1\.0" \
+    "$BINARY" -t "$HOST" -p "$BANNER_PORT" --service-version
+if [[ -n "$v6_pid" ]]; then
+    expect_output "--sv works over IPv6" "^$BANNER_PORT/tcp +open +ssh +V6$" "$BINARY" -t ::1 -p "$BANNER_PORT" --sv
+fi
+expect_output "--sv on several hosts keeps the VERSION column" "^$BANNER_PORT/tcp +open +ssh +JanusTest 1\.0$" \
+    "$BINARY" -t "$HOST,127.0.0.2" -p "$BANNER_PORT" --sv --timeout 300
+expect_output "--sv --udp: an unknown reply is open with no version" "^$UDP_REPLY_PORT/udp +open +[a-z-]+ +-$" \
+    "$BINARY" -t "$HOST" --udp -p "$UDP_REPLY_PORT" --sv --timeout 300
+# Ctrl+C while --sv waits on a service that never answers.
+"$BINARY" -t "$HOST" -p "$SV_SILENT_PORT" --sv --timeout 10000 --json >"$ready_file.out" 2>/dev/null &
+janus_pid=$!
+sleep 0.5
+kill -INT "$janus_pid"
+SECONDS=0
+wait "$janus_pid"
+interrupt_exit=$?
+if [[ $interrupt_exit -eq 130 && $SECONDS -le 2 ]] && python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$ready_file.out"; then
+    pass "Ctrl+C stops --sv probing quickly with exit code 130"
+else
+    fail "Ctrl+C stops --sv probing quickly (exit $interrupt_exit after ${SECONDS}s)"
+fi
+rm -f "$ready_file.out"
 
 # ---- summary ----------------------------------------------------------------
 echo

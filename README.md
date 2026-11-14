@@ -1,13 +1,14 @@
 # Janus
 
 [![CI](https://github.com/fas0ftware/janus/actions/workflows/ci.yml/badge.svg)](https://github.com/fas0ftware/janus/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.5.0-blue)
+![Version](https://img.shields.io/badge/version-1.6.0-blue)
 ![C11](https://img.shields.io/badge/C11-POSIX%20%2B%20pthreads-555)
 ![Checks](https://img.shields.io/badge/ASan%20%C2%B7%20UBSan%20%C2%B7%20TSan%20%C2%B7%20valgrind-clean-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-A small, dependency-free **TCP connect and UDP port scanner** for Linux, written
-in C11 with plain POSIX sockets and pthreads.
+A small, dependency-free **TCP connect and UDP port scanner** with **service and
+version detection** for Linux, written in C11 with plain POSIX sockets and
+pthreads.
 
 ![Janus 1.1: banners, CIDR and IPv6](docs/demo.svg)
 
@@ -43,7 +44,13 @@ Named after Janus, the Roman god of gates and doorways. Ports are doors.
   printable ASCII, so a hostile service cannot inject terminal escape codes
 - Parallel scanning with one pthread worker pool shared by **all hosts and ports**
   (`--threads`, max 256), so a `/24` with 20 ports per host keeps every thread busy
-- Service names from `/etc/services` (`22` → `ssh`)
+- **Service and version detection** (`--sv`): asks each open port what it
+  really runs instead of trusting the port number: `OpenSSH 9.6p1`,
+  `nginx 1.24.0`, `TLS 1.3, TLS_AES_256_GCM_SHA384`, `MariaDB 10.11.6`, Redis,
+  vsftpd, Postfix, Dovecot, VNC, telnet... A silent port gets a hand-written
+  TLS ClientHello and an HTTP `HEAD`; nothing else is ever sent. With `--udp`,
+  DNS, NTP, NetBIOS (computer name), SSDP and mDNS replies are decoded
+- Service names from `/etc/services` (`22` → `ssh`) when `--sv` is not used
 - Human-readable table or **JSON** output for other programs
 - Clean `Ctrl+C`: stops within ~0.1 s and prints partial results
 - Strict input validation, zero compiler warnings, clean under valgrind,
@@ -78,6 +85,10 @@ Usage: janus -t <target> [options]
       --threads <n>     parallel workers across all hosts, 1-256 (default 16)
       --banner          read a short greeting from open ports (HTTP ports
                         get a HEAD request); nothing else is sent
+      --sv              identify what really runs on open ports: service,
+                        product and version (OpenSSH 9.6p1, nginx 1.24.0,
+                        TLS 1.3, MySQL, ...). Silent ports get a TLS and an
+                        HTTP probe; with --udp, replies are decoded
       --open            with several hosts, list only hosts with open ports
       --discover        first find which hosts answer (TCP probes, no root
                         needed) and port-scan only those; down hosts are skipped
@@ -142,6 +153,37 @@ listed. With a single host, a silent target prints `Host seems down` and exits
 with 0; run without `--discover` to scan it anyway. If your devices ignore the
 default probe ports, probe others: `--discover-ports 22,80,443,3389,5353`.
 
+What really runs on your own machine, not what the port number suggests
+(`--service-version` is the long form):
+
+```console
+$ ./janus -t localhost -p 22,443,631,3306,6379,8000 --sv
+Janus scan report for localhost (127.0.0.1)
+Started: 2026-11-14T08:10:00Z
+
+PORT       STATE    SERVICE          VERSION
+22/tcp     open     ssh              OpenSSH 9.6p1 (Ubuntu-3ubuntu13.5)
+443/tcp    open     tls/https        TLS 1.3, TLS_AES_256_GCM_SHA384
+631/tcp    open     http             CUPS 2.4 (IPP/2.1)
+3306/tcp   open     mysql            MariaDB 10.11.6 (0+deb12u1)
+6379/tcp   open     redis            Redis
+8000/tcp   open     http             SimpleHTTP 0.6 (Python/3.12.3)
+
+Scanned 6 port(s) in 0.02 s: 6 open, 0 closed, 0 filtered
+```
+
+(Illustrative output.) A port that answers none of the probes keeps `-` in
+the VERSION column. Add `--banner` to see each port's raw first line under
+it. In JSON every open port gets a `detected` object (or `null`):
+
+```json
+{"port": 22, "protocol": "tcp", "service": "ssh",
+ "detected": {"service": "ssh", "product": "OpenSSH", "version": "9.6p1", "info": "Ubuntu-3ubuntu13.5"}}
+```
+
+`service` stays the `/etc/services` name, so programs that read it keep
+working; `detected.service` is what the port actually spoke.
+
 UDP scan of your own machine or router (silent ports show as `open|filtered`):
 
 ```console
@@ -169,7 +211,7 @@ gains `hosts_up` and `hosts_down`). Every document says `"protocol": "tcp"` or
 $ ./janus -t localhost -p 22,80,443,631,8000 --json
 {
   "scanner": "janus",
-  "version": "1.2.0",
+  "version": "1.6.0",
   "timestamp": "2026-11-11T17:55:00Z",
   "target": "localhost",
   "ip": "127.0.0.1",
@@ -228,6 +270,13 @@ cases happened. The socket is closed right after, which sends FIN (or RST) to
 the target. See [docs/how-it-works.md](docs/how-it-works.md) for the details,
 including what happens on the wire.
 
+With `--sv`, an open port gets up to three more short conversations: Janus
+first listens for a greeting (or sends the port's usual opening), then tries a
+TLS ClientHello and an HTTP `HEAD` on fresh connections, and stops at the
+first reply it recognizes. The parsers live in `src/fingerprint.c` and treat
+every reply as hostile input (section 9 of how-it-works explains the probes,
+the TLS parsing and why TLS is tried before HTTP).
+
 ## Project structure
 
 ```
@@ -238,6 +287,8 @@ src/
   targets.c/.h  target lists, CIDR expansion, top-ports table
   discovery.c/.h  --discover: parallel TCP probes that decide which hosts are up
   udp_scan.c/.h   --udp: datagram probes, ICMP errors via ECONNREFUSED, DNS/NTP payloads
+  version_scan.c/.h  --sv over TCP: which probe to send when, reading replies
+  fingerprint.c/.h   --sv parsers (SSH, HTTP, TLS, MySQL, ...) and the TLS ClientHello
   services.c/.h port number -> service name (getservbyport)
   output.c/.h   text table and hand-written JSON with string escaping
   utils.c/.h    error printing, monotonic clock, UTC timestamps
@@ -246,24 +297,32 @@ tests/
   filtered_listener.py  simulates a filtered port without root
   banner_listener.py    greets clients with a banner (also hostile escape codes)
   udp_listener.py       UDP listener that answers or stays silent
+  service_listener.py   --sv: real TLS server, Redis-style replies, a silent service
   test_udp.c            unit tests: UDP probe payloads
   test_json_escape.c    unit test for JSON string escaping
   test_targets.c        unit tests: lists, CIDR edge cases, banner sanitizing
+  test_fingerprint.c    unit tests: every --sv parser, truncated and hostile replies
 docs/
   how-it-works.md       TCP connect scanning explained
 ```
 
 ## Tests and checks
 
-`make test` runs 38 C unit checks (target lists, CIDR edge cases such as /31,
-/32 and oversized blocks, banner sanitizing, UDP probe payloads) and 95 end-to-end checks against
+`make test` runs 103 C unit checks (target lists, CIDR edge cases such as /31,
+/32 and oversized blocks, banner sanitizing, UDP probe payloads, and 65 for
+`--sv`: every fingerprint parser with real, truncated and hostile replies,
+the TLS ClientHello layout) and 112 end-to-end checks against
 local listeners: open/closed/filtered, threads (also across hosts), Ctrl+C, write errors, JSON,
 banners (including a listener that sends terminal escape codes), top ports,
-lists, CIDR, `--open`, unresolvable hosts in a list, IPv6 and `-4`/`-6`, and
-host discovery (up, down, JSON status, Ctrl+C while probing) and UDP (open,
-closed, open|filtered, JSON, Ctrl+C).
+lists, CIDR, `--open`, unresolvable hosts in a list, IPv6 and `-4`/`-6`,
+host discovery (up, down, JSON status, Ctrl+C while probing), UDP (open,
+closed, open|filtered, JSON, Ctrl+C) and `--sv` (SSH, HTTP on an odd port, a
+real TLS server, Redis, MariaDB, a silent service, JSON, Ctrl+C).
 
 ![make test](docs/test-results.svg)
+
+(The machine in this picture had no IPv6, so its 4 IPv6 checks were skipped:
+108 of the 112. CI runs all of them.)
 
 `make check` repeats the suite under AddressSanitizer + UBSan, runs valgrind
 with leak checking (including a CIDR + IPv6 + banner scan) and
@@ -297,8 +356,14 @@ it, plus cppcheck.
   (localhost is exempt). Use a longer `--timeout` and fewer `--threads` there
 - "filtered" means "no answer in time": a slow or overloaded host can look
   filtered if the timeout is too short
-- Service names come from `/etc/services`; Janus does not talk to the service
-  to identify what really runs there
+- Without `--sv`, service names come from `/etc/services` (the port's usual
+  service, not necessarily what runs there)
+- `--sv` knows a fixed set of protocols (SSH, HTTP/RTSP, TLS, FTP, SMTP, POP3,
+  IMAP, MySQL/MariaDB, PostgreSQL, Redis, memcached, AMQP, VNC, telnet). It
+  has no TLS library, so it reports the TLS version and cipher of `443` but not
+  the web server behind it, and it sends no server name (SNI), so some hosts
+  answer only with a TLS alert. Products that do not name themselves (Postfix
+  hides its version) stay without a version
 - Linux only
 
 ## Roadmap
@@ -306,6 +371,16 @@ it, plus cppcheck.
 - Integration as the scanning engine of `network-monitor` (via `--json`)
 
 ## Changelog
+
+- **1.6.0** – `--sv` / `--service-version`: service and version detection.
+  Open TCP ports are identified from their greeting or from up to three fixed
+  probes (TLS ClientHello, `HEAD`, PostgreSQL SSLRequest): SSH, HTTP/RTSP
+  (Server header), TLS (version and cipher from the ServerHello), FTP, SMTP,
+  POP3, IMAP, MySQL/MariaDB, PostgreSQL, Redis, memcached, AMQP, VNC and
+  telnet. UDP replies to the DNS, NTP, NetBIOS, SSDP and mDNS probes are
+  decoded (NetBIOS computer name, mDNS service types, NTP stratum). New
+  VERSION column, `detected` object in JSON, 65 parser unit tests and 16
+  end-to-end tests including a real TLS server.
 
 - **1.5.0** – more UDP probes: NetBIOS name service (137), SSDP (1900) and mDNS
   (5353) get their standard discovery query, so these services answer and show

@@ -149,7 +149,70 @@ second per remote host). Against a remote host a fast scan can lose some of
 them, and those closed ports then show up as `open|filtered`. Loopback is
 exempt from the limit, which is why the tests can use closed UDP ports.
 
-## 9. Stopping cleanly
+## 9. What really runs there (`--sv`)
+
+A port number is only a convention: `8000` can be a Python dev server, `2222`
+an SSH daemon, `443` anything at all. `/etc/services` only knows the
+convention. With `--sv` Janus talks to every open port just enough to hear the
+service name itself:
+
+| Probe (one connection each)                 | Reply that identifies it                                 |
+|---------------------------------------------|----------------------------------------------------------|
+| nothing: wait for a greeting                | `SSH-2.0-OpenSSH_9.6p1`, `220 (vsFTPd 3.0.5)`, `+OK Dovecot`, `RFB 003.008`, a MySQL handshake packet, telnet option bytes |
+| a TLS **ClientHello**                       | a **ServerHello**: Janus reads the chosen protocol version and cipher suite |
+| `HEAD / HTTP/1.0`                           | `HTTP/1.1 200 OK` + `Server: nginx/1.24.0 (Ubuntu)`, or Redis' `-ERR unknown command` |
+| PostgreSQL `SSLRequest` (5432, 5433 only)   | one byte, `S` or `N`                                      |
+
+The first probe depends on the port: HTTP ports start with `HEAD`, TLS ports
+(443, 993, 8443, ...) with the ClientHello, everything else by listening. If
+that stays silent, Janus opens a new connection and tries the ClientHello,
+then `HEAD`. It stops at the first reply it recognizes, and a service that
+greets in a protocol Janus does not know is left alone after the greeting.
+
+Why the TLS probe comes before `HEAD`: a plain HTTP server answers the
+ClientHello with `400 Bad Request` (still recognized as HTTP), but an HTTPS
+server like nginx answers a plaintext `HEAD` with a perfectly valid HTTP
+error, so the other order would report `http` and hide the TLS.
+
+### The TLS probe
+
+The ClientHello is written byte by byte in `fingerprint.c`: TLS 1.3 and 1.2,
+common AEAD cipher suites plus a few old ones, and an X25519 key share, so a
+modern server answers with a real ServerHello right away. A TLS 1.3 server
+writes `0x0303` (TLS 1.2) in the old version field for compatibility and puts
+the real version into the `supported_versions` extension, so Janus walks the
+extension list to find it. The handshake is never finished: as soon as the
+ServerHello is in, the connection is closed. Janus has no TLS library and
+cannot look inside the encrypted stream, so `443` shows up as `tls/https`
+with `TLS 1.3, TLS_AES_256_GCM_SHA384`, not as the web server behind it.
+
+### Untrusted bytes
+
+Every reply comes from a peer that might be hostile. The parsers in
+`fingerprint.c` are pure functions over `(bytes, length)`: they check every
+length field against the bytes actually received before following it, DNS
+name compression may only point backwards (no loops), and every string they
+produce is printable ASCII, the same rule as for banners. The unit tests feed
+them truncated packets, lying length fields and terminal escape codes under
+AddressSanitizer.
+
+### UDP
+
+UDP replies are already in hand after the scan, so `--sv --udp` costs nothing
+extra: DNS (recursion available? refused?), NTP (version, stratum, the clock
+of a stratum 1 server), NetBIOS (computer name and workgroup), SSDP (the UPnP
+software in the `SERVER` header) and mDNS (the advertised service types such as
+`_ipp._tcp` or `_airplay._tcp`) are decoded.
+
+### Cost and footprint
+
+A service that greets costs nothing extra. A silent one costs up to three
+waits of `--timeout` (at most 1.5 s each) and two more connections. Every
+probe is a fixed, harmless message: no logins, no guessed passwords, nothing
+that changes state on the server. The extra connections do show up in the
+service's logs.
+
+## 10. Stopping cleanly
 
 `Ctrl+C` sends `SIGINT`. Janus' signal handler only sets an atomic flag (doing
 more inside a signal handler is unsafe). Workers check the flag before taking a

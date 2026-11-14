@@ -23,6 +23,7 @@ typedef struct {
     int thread_count;
     bool json_output;
     bool grab_banner; /* --banner */
+    bool detect_version; /* --sv: identify service and version of open ports */
     bool open_only;   /* --open: in multi-host scans, hide hosts without open ports */
     int family;       /* 0 = any, 4 = IPv4 only (-4), 6 = IPv6 only (-6) */
     bool udp;         /* -u / --udp: scan UDP instead of TCP */

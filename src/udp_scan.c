@@ -5,10 +5,12 @@
 #include <fcntl.h>      /* fcntl, O_NONBLOCK */
 #include <netinet/in.h> /* struct sockaddr_in, struct sockaddr_in6 */
 #include <poll.h>       /* poll, struct pollfd */
+#include <stdlib.h>     /* malloc */
 #include <string.h>     /* memset, memcpy */
 #include <sys/socket.h> /* socket, connect, send, recv */
 #include <unistd.h>     /* close */
 
+#include "fingerprint.h"
 #include "utils.h"
 
 /* Longest single poll() wait, so a stop request is noticed quickly. */
@@ -123,7 +125,7 @@ static port_result finish(port_result result, port_state state, int error_code)
 
 port_result scan_udp_port(const scan_target *target, uint16_t port, const scan_settings *settings)
 {
-    port_result result = {.port = port, .state = PORT_NOT_SCANNED, .error_code = 0, .banner = ""};
+    port_result result = {.port = port, .state = PORT_NOT_SCANNED, .error_code = 0, .banner = "", .detected = NULL};
 
     struct sockaddr_storage address = target->address;
     if (target->family == AF_INET) {
@@ -195,9 +197,17 @@ port_result scan_udp_port(const scan_target *target, uint16_t port, const scan_s
             }
 
             /* Either a datagram arrived or an ICMP error is queued: recv() tells which. */
-            unsigned char reply[512];
-            if (recv(fd, reply, sizeof reply, 0) >= 0) {
+            unsigned char reply[1500];
+            ssize_t received = recv(fd, reply, sizeof reply, 0);
+            if (received >= 0) {
                 close(fd);
+                service_info info;
+                if (settings->detect_version && identify_udp_reply(port, reply, (size_t)received, &info)) {
+                    result.detected = malloc(sizeof *result.detected);
+                    if (result.detected != NULL) {
+                        *result.detected = info;
+                    }
+                }
                 return finish(result, PORT_OPEN, 0); /* any answer, even an empty one, means a listener */
             }
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {

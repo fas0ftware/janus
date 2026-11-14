@@ -24,6 +24,7 @@ enum {
     OPTION_OPEN,
     OPTION_DISCOVER,
     OPTION_DISCOVER_PORTS,
+    OPTION_SERVICE_VERSION,
 };
 
 void print_usage(FILE *stream, const char *program_name)
@@ -45,6 +46,10 @@ void print_usage(FILE *stream, const char *program_name)
             "      --threads <n>     parallel workers, 1-%d (default %d)\n"
             "      --banner          read a short greeting from open ports (HTTP ports\n"
             "                        get a HEAD request); nothing else is sent\n"
+            "      --sv              identify what really runs on open ports: service,\n"
+            "                        product and version (OpenSSH 9.6p1, nginx 1.24.0,\n"
+            "                        TLS 1.3, MySQL, ...). Silent ports get a TLS and an\n"
+            "                        HTTP probe; with --udp, replies are decoded\n"
             "      --open            with several hosts, list only hosts with open ports\n"
             "      --discover        first find which hosts answer (TCP probes, no root\n"
             "                        needed) and port-scan only those; down hosts are skipped\n"
@@ -228,6 +233,7 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
     options->thread_count = DEFAULT_THREAD_COUNT;
     options->json_output = false;
     options->grab_banner = false;
+    options->detect_version = false;
     options->open_only = false;
     options->family = 0;
     options->udp = false;
@@ -243,6 +249,8 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
         {"json", no_argument, NULL, OPTION_JSON},
         {"top-ports", required_argument, NULL, OPTION_TOP_PORTS},
         {"banner", no_argument, NULL, OPTION_BANNER},
+        {"sv", no_argument, NULL, OPTION_SERVICE_VERSION},
+        {"service-version", no_argument, NULL, OPTION_SERVICE_VERSION},
         {"udp", no_argument, NULL, 'u'},
         {"open", no_argument, NULL, OPTION_OPEN},
         {"discover", no_argument, NULL, OPTION_DISCOVER},
@@ -271,6 +279,9 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
             break;
         case OPTION_BANNER:
             options->grab_banner = true;
+            break;
+        case OPTION_SERVICE_VERSION:
+            options->detect_version = true;
             break;
         case OPTION_OPEN:
             options->open_only = true;

@@ -15,6 +15,7 @@
 #include <unistd.h>     /* close */
 
 #include "udp_scan.h"
+#include "version_scan.h"
 #include "utils.h"
 
 /* Longest single poll() wait, so a stop request is noticed quickly. */
@@ -233,8 +234,7 @@ void sanitize_banner(const char *raw, size_t raw_length, char *out, size_t out_s
     out[written] = '\0';
 }
 
-/* Ports where services wait for the client to speak HTTP first. */
-static bool is_http_port(uint16_t port)
+bool is_http_port(uint16_t port)
 {
     static const uint16_t http_ports[] = {80, 591, 631, 3000, 5000, 8000, 8008, 8080, 8081, 8888};
     for (size_t i = 0; i < sizeof http_ports / sizeof http_ports[0]; i++) {
@@ -245,8 +245,7 @@ static bool is_http_port(uint16_t port)
     return false;
 }
 
-/* Wait (in stop-aware slices) until fd is readable or the deadline passes. */
-static bool wait_readable(int fd, double deadline_ms)
+bool wait_for_data(int fd, double deadline_ms)
 {
     struct pollfd watch = {.fd = fd, .events = POLLIN, .revents = 0};
     for (;;) {
@@ -274,19 +273,15 @@ static void read_banner(int fd, const scan_target *target, uint16_t port, int ti
                         size_t banner_size)
 {
     banner[0] = '\0';
-    int budget_ms = timeout_ms < 1500 ? timeout_ms : 1500;
+    int budget_ms = service_wait_ms(timeout_ms);
     if (is_http_port(port)) {
-        /* Some servers (e.g. CUPS) refuse requests without a Host header. */
-        char probe[128];
-        int length = snprintf(probe, sizeof probe, "HEAD / HTTP/1.0\r\nHost: %s%s%s\r\n\r\n",
-                              target->family == AF_INET6 ? "[" : "", target->ip_text,
-                              target->family == AF_INET6 ? "]" : "");
-        if (length <= 0 || (size_t)length >= sizeof probe ||
-            send(fd, probe, (size_t)length, MSG_NOSIGNAL) != (ssize_t)length) {
+        char probe[HTTP_REQUEST_MAX];
+        size_t length = http_head_request(target, probe, sizeof probe);
+        if (length == 0 || send(fd, probe, length, MSG_NOSIGNAL) != (ssize_t)length) {
             return;
         }
     }
-    if (!wait_readable(fd, monotonic_time_ms() + budget_ms)) {
+    if (!wait_for_data(fd, monotonic_time_ms() + budget_ms)) {
         return;
     }
     char raw[512];
@@ -296,30 +291,60 @@ static void read_banner(int fd, const scan_target *target, uint16_t port, int ti
     }
 }
 
-port_result scan_port(const scan_target *target, uint16_t port, const scan_settings *settings)
+/* Copy the resolved address and fill in the port for this attempt. */
+static struct sockaddr_storage address_with_port(const scan_target *target, uint16_t port)
 {
-    if (settings->protocol == PROTOCOL_UDP) {
-        return scan_udp_port(target, port, settings);
-    }
-    /* Copy the resolved address and fill in the port for this attempt. */
     struct sockaddr_storage address = target->address;
     if (target->family == AF_INET) {
         ((struct sockaddr_in *)&address)->sin_port = htons(port); /* host -> network byte order */
     } else {
         ((struct sockaddr_in6 *)&address)->sin6_port = htons(port);
     }
+    return address;
+}
 
-    port_result result = {.port = port, .state = PORT_NOT_SCANNED, .error_code = 0, .banner = ""};
+int connect_tcp_port(const scan_target *target, uint16_t port, int timeout_ms)
+{
+    struct sockaddr_storage address = address_with_port(target, port);
+    int error_code = 0;
+    int fd = -1;
+    connect_with_timeout((const struct sockaddr *)&address, target->address_length, timeout_ms, &error_code, &fd);
+    return fd;
+}
+
+port_result scan_port(const scan_target *target, uint16_t port, const scan_settings *settings)
+{
+    if (settings->protocol == PROTOCOL_UDP) {
+        return scan_udp_port(target, port, settings);
+    }
+    struct sockaddr_storage address = address_with_port(target, port);
+
+    port_result result = {.port = port, .state = PORT_NOT_SCANNED, .error_code = 0, .banner = "", .detected = NULL};
     int open_fd = -1;
     result.state = connect_with_timeout((const struct sockaddr *)&address, target->address_length,
                                         settings->timeout_ms, &result.error_code, &open_fd);
     if (open_fd != -1) {
-        if (settings->grab_banner) {
-            read_banner(open_fd, target, port, settings->timeout_ms, result.banner, sizeof result.banner);
+        if (settings->detect_version) {
+            detect_tcp_service(target, open_fd, settings, &result); /* closes open_fd */
+        } else {
+            if (settings->grab_banner) {
+                read_banner(open_fd, target, port, settings->timeout_ms, result.banner, sizeof result.banner);
+            }
+            close(open_fd);
         }
-        close(open_fd);
     }
     return result;
+}
+
+void free_port_details(port_result *results, size_t count)
+{
+    if (results == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        free(results[i].detected);
+        results[i].detected = NULL;
+    }
 }
 
 /*

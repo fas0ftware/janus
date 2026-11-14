@@ -4,6 +4,7 @@
 #include <stdio.h>   /* printf, putchar, fputs */
 #include <string.h>  /* strcmp, strerror */
 
+#include "fingerprint.h"
 #include "services.h"
 #include "utils.h"
 
@@ -87,6 +88,49 @@ static const char *protocol_name(const scan_report *report)
 }
 
 /*
+ * The SERVICE column: what --sv found if it found something, otherwise the
+ * name /etc/services gives the port number. TLS is shown together with the
+ * port's usual service, "tls/https", because --sv cannot look inside it.
+ */
+static const char *service_label(const port_result *result, const char *protocol, char *buffer, size_t size)
+{
+    const char *by_port = lookup_service_name(result->port, protocol);
+    if (result->detected == NULL || result->detected->service[0] == '\0') {
+        return by_port;
+    }
+    if (strcmp(result->detected->service, "tls") == 0 && strcmp(by_port, "unknown") != 0) {
+        snprintf(buffer, size, "tls/%.*s", (int)(size > 5 ? size - 5 : 0), by_port);
+        return buffer;
+    }
+    return result->detected->service;
+}
+
+/* PORT, STATE, SERVICE and VERSION; the banner goes on its own line below. */
+static void print_version_table(const scan_report *report, int state_width)
+{
+    const char *protocol = protocol_name(report);
+    printf("%-10s %-*s %-16s %s\n", "PORT", state_width, "STATE", "SERVICE", "VERSION");
+    for (size_t i = 0; i < report->result_count; i++) {
+        const port_result *result = &report->results[i];
+        if (result->state != PORT_OPEN && result->state != PORT_OPEN_FILTERED) {
+            continue;
+        }
+        char port_label[16];
+        char service_buffer[40];
+        char version[DETECTED_PRODUCT_SIZE + DETECTED_VERSION_SIZE + DETECTED_INFO_SIZE + 8] = "";
+        snprintf(port_label, sizeof port_label, "%u/%s", (unsigned)result->port, protocol);
+        if (result->detected != NULL) {
+            format_detected_version(result->detected, version, sizeof version);
+        }
+        printf("%-10s %-*s %-16s %s\n", port_label, state_width, port_state_to_string(result->state),
+               service_label(result, protocol, service_buffer, sizeof service_buffer), version[0] ? version : "-");
+        if (report->show_banner && result->banner[0] != '\0') {
+            printf("%-10s banner: %s\n", "", result->banner);
+        }
+    }
+}
+
+/*
  * Table of open ports (and, for UDP, open|filtered ones); adds a BANNER column
  * when --banner was given. The UDP state "open|filtered" needs a wider column.
  */
@@ -95,6 +139,10 @@ static void print_open_table(const scan_report *report)
     const char *protocol = protocol_name(report);
     int state_width = report->protocol == PROTOCOL_UDP ? 14 : 8;
 
+    if (report->show_version) {
+        print_version_table(report, state_width);
+        return;
+    }
     /* %-10s pads to 10 columns, left aligned, so columns line up. */
     if (report->show_banner) {
         printf("%-10s %-*s %-16s %s\n", "PORT", state_width, "STATE", "SERVICE", "BANNER");
@@ -199,6 +247,25 @@ static void print_json_string(const char *text)
     putchar('"');
 }
 
+/* --sv result of one port: an object with four strings ("" = unknown), or null if nothing was recognized. */
+static void print_detected_json(const service_info *detected)
+{
+    printf(", \"detected\": ");
+    if (detected == NULL) {
+        printf("null");
+        return;
+    }
+    printf("{\"service\": ");
+    print_json_string(detected->service);
+    printf(", \"product\": ");
+    print_json_string(detected->product);
+    printf(", \"version\": ");
+    print_json_string(detected->version);
+    printf(", \"info\": ");
+    print_json_string(detected->info);
+    printf("}");
+}
+
 /* One JSON array of the ports in a given state, e.g. "open_ports": [ {...}, {...} ], with a trailing comma. */
 static void print_port_array(const scan_report *report, const char *pad, const char *key, port_state wanted)
 {
@@ -217,6 +284,9 @@ static void print_port_array(const scan_report *report, const char *pad, const c
         if (wanted == PORT_OPEN && report->show_banner) {
             printf(", \"banner\": ");
             print_json_string(result->banner);
+        }
+        if (wanted == PORT_OPEN && report->show_version) {
+            print_detected_json(result->detected);
         }
         printf("}");
         first = false;

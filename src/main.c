@@ -1,5 +1,6 @@
 /*
- * Janus - a simple TCP connect port scanner for Linux.
+ * Janus - a simple TCP connect and UDP port scanner for Linux,
+ * with service and version detection (--sv).
  *
  * Authorized use only: scan only hosts and networks you own
  * or have explicit permission to test.
@@ -73,6 +74,7 @@ static void prepare_host(const char *host, const scan_options *options, port_res
         .duration_ms = 0.0,
         .interrupted = false,
         .show_banner = options->grab_banner,
+        .show_version = options->detect_version,
         .resolved = false,
         .status = HOST_STATUS_UNKNOWN,
         .protocol = options->udp ? PROTOCOL_UDP : PROTOCOL_TCP,
@@ -167,6 +169,7 @@ int main(int argc, char *argv[])
         .timeout_ms = options.timeout_ms,
         .thread_count = options.thread_count,
         .grab_banner = options.grab_banner,
+        .detect_version = options.detect_version,
         .protocol = options.udp ? PROTOCOL_UDP : PROTOCOL_TCP,
     };
     char started_at[TIMESTAMP_SIZE] = "";
@@ -277,6 +280,9 @@ int main(int argc, char *argv[])
 
 cleanup:
     close_service_database();
+    if (results != NULL) {
+        free_port_details(results, targets.count * options.port_count);
+    }
     free(host_ms);
     free(to_scan);
     free(host_up);
