@@ -25,6 +25,7 @@ enum {
     OPTION_DISCOVER,
     OPTION_DISCOVER_PORTS,
     OPTION_SERVICE_VERSION,
+    OPTION_ADAPTIVE,
 };
 
 void print_usage(FILE *stream, const char *program_name)
@@ -44,6 +45,9 @@ void print_usage(FILE *stream, const char *program_name)
             "                        Silent ports are reported as open|filtered\n"
             "      --timeout <ms>    wait per port in milliseconds, %d-%d (default %d)\n"
             "      --threads <n>     parallel workers, 1-%d (default %d)\n"
+            "      --adaptive        measure each host's round-trip time and wait only as\n"
+            "                        long as it needs (at least 100 ms, at most --timeout);\n"
+            "                        silent ports are tried twice. TCP only\n"
             "      --banner          read a short greeting from open ports (HTTP ports\n"
             "                        get a HEAD request); nothing else is sent\n"
             "      --sv              identify what really runs on open ports: service,\n"
@@ -237,6 +241,7 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
     options->json_output = false;
     options->grab_banner = false;
     options->detect_version = false;
+    options->adaptive = false;
     options->open_only = false;
     options->family = 0;
     options->udp = false;
@@ -253,6 +258,7 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
         {"top-ports", required_argument, NULL, OPTION_TOP_PORTS},
         {"banner", no_argument, NULL, OPTION_BANNER},
         {"sv", no_argument, NULL, OPTION_SERVICE_VERSION},
+        {"adaptive", no_argument, NULL, OPTION_ADAPTIVE},
         {"service-version", no_argument, NULL, OPTION_SERVICE_VERSION},
         {"udp", no_argument, NULL, 'u'},
         {"open", no_argument, NULL, OPTION_OPEN},
@@ -282,6 +288,9 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
             break;
         case OPTION_BANNER:
             options->grab_banner = true;
+            break;
+        case OPTION_ADAPTIVE:
+            options->adaptive = true;
             break;
         case OPTION_SERVICE_VERSION:
             options->detect_version = true;
@@ -359,6 +368,11 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
 
     if (options->udp && options->grab_banner) {
         print_error("--banner works only with TCP scans");
+        return PARSE_ERROR;
+    }
+    if (options->udp && options->adaptive) {
+        /* UDP silence is an answer (open|filtered): shortening the wait would change results. */
+        print_error("--adaptive works only with TCP scans");
         return PARSE_ERROR;
     }
 

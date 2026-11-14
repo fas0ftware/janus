@@ -14,40 +14,40 @@
 <text x="14" y="182" fill="#3fb950">PASS: /32 is one host</text>
 <text x="14" y="200" fill="#3fb950">PASS: /20 is the largest block</text>
 <text x="14" y="218" fill="#3fb950">PASS: IPv6 literal in a list</text>
-<text x="14" y="236" fill="#8b949e">   … 212 more lines …</text>
-<text x="14" y="254" fill="#3fb950">PASS: --udp works on several hosts</text>
-<text x="14" y="272" fill="#3fb950">PASS: --udp combines with --discover (TCP probes, UDP scan)</text>
-<text x="14" y="290" fill="#3fb950">PASS: Ctrl+C stops a UDP scan quickly with exit code 130</text>
-<text x="14" y="308" fill="#3fb950">PASS: hosts with few ports are scanned in parallel (1006 ms for 3 hosts x 1 s)</text>
-<text x="14" y="326" fill="#3fb950">PASS: per-host duration_ms is measured per host, not for the whole run</text>
-<text x="14" y="344" fill="#3fb950">PASS: many hosts with a few ports each give complete results</text>
-<text x="14" y="362" fill="#3fb950">PASS: Ctrl+C stops a multi-host scan quickly with exit code 130</text>
-<text x="14" y="380" fill="#3fb950">PASS: --sv: SSH greeting gives product and version</text>
-<text x="14" y="398" fill="#3fb950">PASS: --sv: HTTP on an unusual port is found and named</text>
-<text x="14" y="416" fill="#3fb950">PASS: --sv: TLS server shows protocol version and cipher</text>
-<text x="14" y="434" fill="#3fb950">PASS: --sv: certificate of a TLS 1.3 server is read through a TLS 1.2 probe</text>
-<text x="14" y="452" fill="#3fb950">PASS: --sv: a host name is sent as SNI and picks the server&#x27;s matching certificate</text>
-<text x="14" y="470" fill="#3fb950">PASS: --sv: subjectAltName entries are listed</text>
-<text x="14" y="488" fill="#3fb950">PASS: --sv JSON: certificate details; null when TLS 1.3 keeps it encrypted</text>
-<text x="14" y="506" fill="#3fb950">PASS: --sv: smtp STARTTLS upgrade shows TLS version and certificate</text>
-<text x="14" y="524" fill="#3fb950">PASS: --sv: imap STARTTLS upgrade shows TLS version and certificate</text>
-<text x="14" y="542" fill="#3fb950">PASS: --sv: pop3 STARTTLS upgrade shows TLS version and certificate</text>
-<text x="14" y="560" fill="#3fb950">PASS: --sv: ftp STARTTLS upgrade shows TLS version and certificate</text>
-<text x="14" y="578" fill="#3fb950">PASS: --sv: a mail server without STARTTLS is flagged</text>
-<text x="14" y="596" fill="#3fb950">PASS: --sv JSON: starttls object (offered or not), null where it does not apply</text>
-<text x="14" y="614" fill="#3fb950">PASS: --sv: Redis is recognized by its reply to HEAD</text>
-<text x="14" y="632" fill="#3fb950">PASS: --sv: MariaDB version comes from the handshake</text>
-<text x="14" y="650" fill="#3fb950">PASS: --sv: a silent unknown service stays unknown</text>
-<text x="14" y="668" fill="#3fb950">PASS: --sv: a silent port costs three short waits, not more (908 ms at --timeout 300)</text>
-<text x="14" y="686" fill="#3fb950">PASS: --sv: closed ports are not probed</text>
-<text x="14" y="704" fill="#3fb950">PASS: --sv with --banner shows the banner under the port</text>
-<text x="14" y="722" fill="#3fb950">PASS: --sv never prints terminal escape codes</text>
-<text x="14" y="740" fill="#3fb950">PASS: --sv JSON has a detected object per open port (null if unknown)</text>
-<text x="14" y="758" fill="#3fb950">PASS: without --sv the JSON has no detected key</text>
-<text x="14" y="776" fill="#3fb950">PASS: --service-version is the long form of --sv</text>
-<text x="14" y="794" fill="#3fb950">PASS: --sv on several hosts keeps the VERSION column</text>
-<text x="14" y="812" fill="#3fb950">PASS: --sv --udp: an unknown reply is open with no version</text>
-<text x="14" y="830" fill="#3fb950">PASS: Ctrl+C stops --sv probing quickly with exit code 130</text>
+<text x="14" y="236" fill="#8b949e">   … 226 more lines …</text>
+<text x="14" y="254" fill="#3fb950">PASS: --sv: HTTP on an unusual port is found and named</text>
+<text x="14" y="272" fill="#3fb950">PASS: --sv: TLS server shows protocol version and cipher</text>
+<text x="14" y="290" fill="#3fb950">PASS: --sv: certificate of a TLS 1.3 server is read through a TLS 1.2 probe</text>
+<text x="14" y="308" fill="#3fb950">PASS: --sv: a host name is sent as SNI and picks the server&#x27;s matching certificate</text>
+<text x="14" y="326" fill="#3fb950">PASS: --sv: subjectAltName entries are listed</text>
+<text x="14" y="344" fill="#3fb950">PASS: --sv JSON: certificate details; null when TLS 1.3 keeps it encrypted</text>
+<text x="14" y="362" fill="#3fb950">PASS: --sv: smtp STARTTLS upgrade shows TLS version and certificate</text>
+<text x="14" y="380" fill="#3fb950">PASS: --sv: imap STARTTLS upgrade shows TLS version and certificate</text>
+<text x="14" y="398" fill="#3fb950">PASS: --sv: pop3 STARTTLS upgrade shows TLS version and certificate</text>
+<text x="14" y="416" fill="#3fb950">PASS: --sv: ftp STARTTLS upgrade shows TLS version and certificate</text>
+<text x="14" y="434" fill="#3fb950">PASS: --sv: a mail server without STARTTLS is flagged</text>
+<text x="14" y="452" fill="#3fb950">PASS: --sv JSON: starttls object (offered or not), null where it does not apply</text>
+<text x="14" y="470" fill="#3fb950">PASS: --sv: Redis is recognized by its reply to HEAD</text>
+<text x="14" y="488" fill="#3fb950">PASS: --sv: MariaDB version comes from the handshake</text>
+<text x="14" y="506" fill="#3fb950">PASS: --sv: a silent unknown service stays unknown</text>
+<text x="14" y="524" fill="#3fb950">PASS: --sv: a silent port costs three short waits, not more (909 ms at --timeout 300)</text>
+<text x="14" y="542" fill="#3fb950">PASS: --sv: closed ports are not probed</text>
+<text x="14" y="560" fill="#3fb950">PASS: --sv with --banner shows the banner under the port</text>
+<text x="14" y="578" fill="#3fb950">PASS: --sv never prints terminal escape codes</text>
+<text x="14" y="596" fill="#3fb950">PASS: --sv JSON has a detected object per open port (null if unknown)</text>
+<text x="14" y="614" fill="#3fb950">PASS: without --sv the JSON has no detected key</text>
+<text x="14" y="632" fill="#3fb950">PASS: --service-version is the long form of --sv</text>
+<text x="14" y="650" fill="#3fb950">PASS: --sv on several hosts keeps the VERSION column</text>
+<text x="14" y="668" fill="#3fb950">PASS: --sv --udp: an unknown reply is open with no version</text>
+<text x="14" y="686" fill="#3fb950">PASS: Ctrl+C stops --sv probing quickly with exit code 130</text>
+<text x="14" y="704" fill="#3fb950">PASS: --adaptive: a filtered port costs two short waits, not --timeout (205 ms instead of 3 s)</text>
+<text x="14" y="722" fill="#3fb950">PASS: --adaptive finds the same open port</text>
+<text x="14" y="740" fill="#3fb950">PASS: a host that answers gets a latency line</text>
+<text x="14" y="758" fill="#3fb950">PASS: no latency is invented for a host that never answered</text>
+<text x="14" y="776" fill="#3fb950">PASS: JSON latency_ms per host, null if it never answered</text>
+<text x="14" y="794" fill="#3fb950">PASS: several hosts show their latency</text>
+<text x="14" y="812" fill="#3fb950">PASS: --adaptive with --udp is a usage error</text>
+<text x="14" y="830" fill="#3fb950">PASS: --udp measures latency from replies and ICMP errors</text>
 <text x="14" y="848" fill="#e6edf3"></text>
-<text x="14" y="866" fill="#3fb950">118 passed, 0 failed</text>
+<text x="14" y="866" fill="#3fb950">126 passed, 0 failed</text>
 </g></svg>

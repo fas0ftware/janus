@@ -1,7 +1,7 @@
 # Janus
 
 [![CI](https://github.com/fas0ftware/janus/actions/workflows/ci.yml/badge.svg)](https://github.com/fas0ftware/janus/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.8.0-blue)
+![Version](https://img.shields.io/badge/version-1.9.0-blue)
 ![C11](https://img.shields.io/badge/C11-POSIX%20%2B%20pthreads-555)
 ![Checks](https://img.shields.io/badge/ASan%20%C2%B7%20UBSan%20%C2%B7%20TSan%20%C2%B7%20valgrind-clean-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -30,6 +30,10 @@ Named after Janus, the Roman god of gates and doorways. Ports are doors.
   NetBIOS, SSDP and mDNS get their standard query so they answer; the default
   is the 20 most common UDP ports
 - Non-blocking `connect()` + `poll()` with a per-port timeout
+- **Measured latency** per host (median time of its answers), and
+  **`--adaptive`**: wait only as long as the host's measured round-trip time
+  needs (the TCP retransmission formula `srtt + 4·rttvar`, at least 100 ms),
+  trying silent ports twice. Filtered ports stop costing the full `--timeout`
 - **IPv4 and IPv6** (`-4` / `-6` to force a family when resolving names)
 - **Several targets per run:** lists (`host1,host2`) and IPv4 **CIDR blocks**
   (`192.168.1.0/24`, from /20 to /32), with `--open` to list only hosts that
@@ -91,6 +95,9 @@ Usage: janus -t <target> [options]
                         Silent ports are reported as open|filtered
       --timeout <ms>    wait per port in milliseconds, 1-60000 (default 1000)
       --threads <n>     parallel workers across all hosts, 1-256 (default 16)
+      --adaptive        measure each host's round-trip time and wait only as
+                        long as it needs (at least 100 ms, at most --timeout);
+                        silent ports are tried twice. TCP only
       --banner          read a short greeting from open ports (HTTP ports
                         get a HEAD request); nothing else is sent
       --sv              identify what really runs on open ports: service,
@@ -163,6 +170,22 @@ Scanned 254 host(s) in 6.41 s: 2 up, 252 down, 1 with open ports
 listed. With a single host, a silent target prints `Host seems down` and exits
 with 0; run without `--discover` to scan it anyway. If your devices ignore the
 default probe ports, probe others: `--discover-ports 22,80,443,3389,5353`.
+
+A host behind a firewall that drops packets: every silent port costs the
+full `--timeout`. With `--adaptive`, Janus learns from the ports that do
+answer how far away the host is, and waits only that long (twice):
+
+```console
+$ ./janus -t 192.168.1.1 -p 1-1024 --timeout 2000 --adaptive
+...
+Scanned 1024 port(s) in 14.6 s: 3 open, 12 closed, 1009 filtered
+Latency: 0.84 ms (median of the host's answers)
+```
+
+(Illustrative output; without `--adaptive` the same scan waits 2 s for each
+of the 1009 silent ports, about 2 minutes with 16 threads.) Every report
+shows the host's latency when it answered at all; JSON has `latency_ms`
+per host (`null` if it never answered).
 
 What really runs on your own machine, not what the port number suggests
 (`--service-version` is the long form):
@@ -253,7 +276,7 @@ gains `hosts_up` and `hosts_down`). Every document says `"protocol": "tcp"` or
 $ ./janus -t localhost -p 22,80,443,631,8000 --json
 {
   "scanner": "janus",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "timestamp": "2026-11-11T17:55:00Z",
   "target": "localhost",
   "ip": "127.0.0.1",
@@ -350,11 +373,12 @@ docs/
 
 ## Tests and checks
 
-`make test` runs 135 C unit checks (target lists, CIDR edge cases such as /31,
-/32 and oversized blocks, banner sanitizing, UDP probe payloads, and 97 for
+`make test` runs 141 C unit checks (target lists, CIDR edge cases such as /31,
+/32 and oversized blocks, banner sanitizing, UDP probe payloads, the
+adaptive timeout formula, and 97 for
 `--sv`: every fingerprint parser with real, truncated and hostile replies,
 the TLS ClientHello layout and SNI, a real X.509 certificate cut at every
-length and corrupted 2345 ways, STARTTLS reply framing) and 122 end-to-end checks against
+length and corrupted 2345 ways, STARTTLS reply framing) and 130 end-to-end checks against
 local listeners: open/closed/filtered, threads (also across hosts), Ctrl+C, write errors, JSON,
 banners (including a listener that sends terminal escape codes), top ports,
 lists, CIDR, `--open`, unresolvable hosts in a list, IPv6 and `-4`/`-6`,
@@ -362,12 +386,13 @@ host discovery (up, down, JSON status, Ctrl+C while probing), UDP (open,
 closed, open|filtered, JSON, Ctrl+C) and `--sv` (SSH, HTTP on an odd port, a
 real TLS server with a certificate per SNI name, a TLS 1.3-only server,
 SMTP/IMAP/POP3/FTP servers that switch to TLS and one that cannot, Redis,
-MariaDB, a silent service, JSON, Ctrl+C).
+MariaDB, a silent service, JSON, Ctrl+C), latency reporting and `--adaptive`
+(same results, a filtered port in 0.2 s instead of 3 s).
 
 ![make test](docs/test-results.svg)
 
 (The machine in this picture had no IPv6, so its 4 IPv6 checks were skipped:
-118 of the 122. CI runs all of them.)
+126 of the 130. CI runs all of them.)
 
 `make check` repeats the suite under AddressSanitizer + UBSan, runs valgrind
 with leak checking (including a CIDR + IPv6 + banner scan) and
@@ -400,7 +425,12 @@ it, plus cppcheck.
   fast UDP scan of a *remote* host can report closed ports as `open|filtered`
   (localhost is exempt). Use a longer `--timeout` and fewer `--threads` there
 - "filtered" means "no answer in time": a slow or overloaded host can look
-  filtered if the timeout is too short
+  filtered if the timeout is too short. `--adaptive` makes this trade-off on
+  purpose: its timeout follows the host's measured RTT, and a host whose
+  answers suddenly slow down by much more than its usual jitter can have
+  ports reported filtered. The first ports (before 3 answers were measured,
+  one per thread) still use the full `--timeout`. UDP is not adaptive:
+  there, silence is itself the result (`open|filtered`)
 - Without `--sv`, service names come from `/etc/services` (the port's usual
   service, not necessarily what runs there)
 - `--sv` knows a fixed set of protocols (SSH, HTTP/RTSP, TLS, FTP, SMTP, POP3,
@@ -418,6 +448,13 @@ it, plus cppcheck.
 - Integration as the scanning engine of `network-monitor` (via `--json`)
 
 ## Changelog
+
+- **1.9.0** – measured latency and `--adaptive`. Every answer (SYN-ACK, RST,
+  UDP reply, ICMP error) is timed; reports show the host's median latency
+  (`latency_ms` in JSON). `--adaptive` keeps a smoothed RTT per host
+  (RFC 6298) and gives each TCP connect `srtt + 4·rttvar` (100 ms to
+  `--timeout`), retrying silent ports once, so filtered ports no longer cost
+  the full timeout. 6 unit and 8 end-to-end checks; TSan and valgrind runs.
 
 - **1.8.0** – STARTTLS in `--sv`: SMTP (`EHLO`, `STARTTLS`), IMAP
   (`STARTTLS`), POP3 (`STLS`), FTP (`AUTH TLS`) and PostgreSQL (`SSLRequest`)

@@ -64,6 +64,7 @@ static void prepare_host(const char *host, const scan_options *options, port_res
         memset(&results[i], 0, sizeof results[i]);
         results[i].port = options->ports[i];
         results[i].state = PORT_NOT_SCANNED;
+        results[i].rtt_ms = -1.0f;
     }
     *report = (scan_report){
         .target = host,
@@ -170,6 +171,8 @@ int main(int argc, char *argv[])
         .thread_count = options.thread_count,
         .grab_banner = options.grab_banner,
         .detect_version = options.detect_version,
+        .adaptive = options.adaptive,
+        .connect_timeout_ms = 0,
         .protocol = options.udp ? PROTOCOL_UDP : PROTOCOL_TCP,
     };
     char started_at[TIMESTAMP_SIZE] = "";

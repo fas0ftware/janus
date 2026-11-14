@@ -643,6 +643,49 @@ else
 fi
 rm -f "$ready_file.out"
 
+# ---- v1.9: measured latency and --adaptive ------------------------------------------
+# 29 closed ports and the open one answer within microseconds; the filtered port never answers.
+adaptive_range="$((FILTERED_PORT - 30))-$FILTERED_PORT"
+start_ns=$(date +%s%N)
+adaptive_out="$("$BINARY" -t "$HOST" -p "$adaptive_range" --timeout 3000 --threads 4 --adaptive 2>&1)"
+elapsed_ms=$(( ($(date +%s%N) - start_ns) / 1000000 ))
+if [[ "$adaptive_out" == *"31 port(s)"*"1 open, 29 closed, 1 filtered"* && $elapsed_ms -lt 1500 ]]; then
+    pass "--adaptive: a filtered port costs two short waits, not --timeout (${elapsed_ms} ms instead of 3 s)"
+else
+    fail "--adaptive: a filtered port costs two short waits (${elapsed_ms} ms)"
+    sed 's/^/    | /' <<<"$adaptive_out"
+fi
+expect_output "--adaptive finds the same open port" "^$OPEN_PORT/tcp +open" \
+    "$BINARY" -t "$HOST" -p "$((OPEN_PORT - 20))-$((OPEN_PORT + 9))" --adaptive --threads 2
+expect_output "a host that answers gets a latency line" "^Latency: [0-9]+\.[0-9]{2} ms \(median" \
+    "$BINARY" -t "$HOST" -p "$CLOSED_PORT,$OPEN_PORT"
+silent_out="$("$BINARY" -t "$HOST" -p "$FILTERED_PORT" --timeout 300 2>&1)"
+if [[ "$silent_out" != *"Latency"* ]]; then
+    pass "no latency is invented for a host that never answered"
+else
+    fail "no latency is invented for a host that never answered"
+fi
+latency_json="$("$BINARY" -t "$HOST,127.0.0.2" -p "$CLOSED_PORT,$FILTERED_PORT" --timeout 300 --json 2>/dev/null)"
+if python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+hosts = {h["target"]: h for h in d["hosts"]}
+a, b = hosts["127.0.0.1"], hosts["127.0.0.2"]
+assert isinstance(a["latency_ms"], float) and 0 <= a["latency_ms"] < 100, a
+assert isinstance(b["latency_ms"], float), b
+assert json.loads(sys.argv[2])["latency_ms"] is None
+' "$latency_json" "$("$BINARY" -t "$HOST" -p "$FILTERED_PORT" --timeout 200 --json 2>/dev/null)"; then
+    pass "JSON latency_ms per host, null if it never answered"
+else
+    fail "JSON latency_ms per host, null if it never answered"
+    sed 's/^/    | /' <<<"$latency_json"
+fi
+expect_output "several hosts show their latency" "^127\.0\.0\.1: 1 open, latency [0-9.]+ ms$" \
+    "$BINARY" -t "$HOST,127.0.0.2" -p "$OPEN_PORT" --adaptive
+expect_exit "--adaptive with --udp is a usage error" 2 "$BINARY" -t "$HOST" --udp --adaptive
+expect_output "--udp measures latency from replies and ICMP errors" "^Latency: " \
+    "$BINARY" -t "$HOST" --udp -p "$UDP_REPLY_PORT,$UDP_CLOSED_PORT" --timeout 300
+
 # ---- summary ----------------------------------------------------------------
 echo
 echo "$passed passed, $failed failed"

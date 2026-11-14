@@ -2,6 +2,7 @@
 
 #include <stdbool.h> /* bool */
 #include <stdio.h>   /* printf, putchar, fputs */
+#include <stdlib.h>  /* malloc, free, qsort */
 #include <string.h>  /* strcmp, strerror */
 
 #include "fingerprint.h"
@@ -80,6 +81,43 @@ size_t count_open(const scan_report *report)
 size_t count_open_filtered(const scan_report *report)
 {
     return count_in_state(report, PORT_OPEN_FILTERED);
+}
+
+static int compare_floats(const void *a, const void *b)
+{
+    float x = *(const float *)a;
+    float y = *(const float *)b;
+    return (x > y) - (x < y);
+}
+
+/*
+ * The host's latency: the median time its answers took (SYN-ACK, RST, UDP
+ * reply, ICMP error). The median ignores a few slow outliers. -1 if the host
+ * never answered (all ports filtered, or not scanned).
+ */
+static double median_latency_ms(const scan_report *report)
+{
+    size_t count = 0;
+    for (size_t i = 0; i < report->result_count; i++) {
+        count += report->results[i].rtt_ms >= 0.0f;
+    }
+    if (count == 0) {
+        return -1.0;
+    }
+    float *samples = malloc(count * sizeof *samples);
+    if (samples == NULL) {
+        return -1.0;
+    }
+    size_t used = 0;
+    for (size_t i = 0; i < report->result_count; i++) {
+        if (report->results[i].rtt_ms >= 0.0f) {
+            samples[used++] = report->results[i].rtt_ms;
+        }
+    }
+    qsort(samples, count, sizeof *samples, compare_floats);
+    double median = count % 2 ? samples[count / 2] : (samples[count / 2 - 1] + samples[count / 2]) / 2.0;
+    free(samples);
+    return median;
 }
 
 static const char *protocol_name(const scan_report *report)
@@ -238,6 +276,10 @@ void print_result_text(const scan_report *report)
         printf(", %zu not scanned", counts.not_scanned);
     }
     printf("\n");
+    double latency = median_latency_ms(report);
+    if (latency >= 0.0) {
+        printf("Latency: %.2f ms (median of the host's answers)\n", latency);
+    }
 
     print_warnings(report, &counts);
 }
@@ -389,6 +431,12 @@ static void print_host_fields(const scan_report *report, const char *pad, const 
     }
     /* Whole milliseconds: integers are simpler for other programs to read. */
     printf("%s\"duration_ms\": %.0f,\n", pad, report->duration_ms);
+    double latency = median_latency_ms(report);
+    if (latency >= 0.0) {
+        printf("%s\"latency_ms\": %.3f,\n", pad, latency);
+    } else {
+        printf("%s\"latency_ms\": null,\n", pad);
+    }
     printf("%s\"ports_requested\": %zu,\n", pad, report->result_count);
     printf("%s\"ports_scanned\": %zu,\n", pad, report->result_count - counts->not_scanned);
     printf("%s\"interrupted\": %s,\n", pad, report->interrupted ? "true" : "false");
@@ -458,6 +506,10 @@ void print_multi_text(const scan_report *reports, size_t count, bool open_only, 
             printf("%zu open", open);
             if (uncertain > 0) {
                 printf(", %zu open|filtered", uncertain);
+            }
+            double latency = median_latency_ms(report);
+            if (latency >= 0.0) {
+                printf(", latency %.2f ms", latency);
             }
             printf("\n");
             print_open_table(report);

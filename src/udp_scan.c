@@ -125,7 +125,8 @@ static port_result finish(port_result result, port_state state, int error_code)
 
 port_result scan_udp_port(const scan_target *target, uint16_t port, const scan_settings *settings)
 {
-    port_result result = {.port = port, .state = PORT_NOT_SCANNED, .error_code = 0, .banner = "", .detected = NULL};
+    port_result result = {
+        .port = port, .state = PORT_NOT_SCANNED, .error_code = 0, .banner = "", .rtt_ms = -1.0f, .detected = NULL};
 
     struct sockaddr_storage address = target->address;
     if (target->family == AF_INET) {
@@ -165,6 +166,7 @@ port_result scan_udp_port(const scan_target *target, uint16_t port, const scan_s
     }
 
     for (int attempt = 0; attempt < UDP_ATTEMPTS; attempt++) {
+        double sent_ms = monotonic_time_ms();
         if (send(fd, payload, payload_length, MSG_NOSIGNAL) == -1 && errno != EAGAIN && errno != EWOULDBLOCK &&
             errno != ENOBUFS) {
             /* Typically ECONNREFUSED: an ICMP error from the previous attempt is still pending. */
@@ -201,6 +203,7 @@ port_result scan_udp_port(const scan_target *target, uint16_t port, const scan_s
             ssize_t received = recv(fd, reply, sizeof reply, 0);
             if (received >= 0) {
                 close(fd);
+                result.rtt_ms = (float)(monotonic_time_ms() - sent_ms);
                 service_info info;
                 if (settings->detect_version && identify_udp_reply(port, reply, (size_t)received, &info)) {
                     result.detected = malloc(sizeof *result.detected);
@@ -215,6 +218,7 @@ port_result scan_udp_port(const scan_target *target, uint16_t port, const scan_s
             }
             int saved = errno;
             close(fd);
+            result.rtt_ms = (float)(monotonic_time_ms() - sent_ms); /* the ICMP error came back */
             return finish(result, classify_udp_error(saved), saved);
         }
     }

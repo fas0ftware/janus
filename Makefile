@@ -107,6 +107,7 @@ memcheck: $(TARGET)
 	$(VALGRIND) ./$(TARGET) -t 127.0.0.1 --udp --banner 2> /dev/null; test $$? -eq 2
 	$(VALGRIND) ./$(TARGET) -t 127.0.0.0/30,::1 -p 22,80,443,631,8000 --sv --banner --timeout 300 --json > /dev/null
 	$(VALGRIND) ./$(TARGET) -t 127.0.0.1 --udp --sv --timeout 200 > /dev/null
+	$(VALGRIND) ./$(TARGET) -t 127.0.0.0/30 -p 1-200 --adaptive --timeout 300 --json > /dev/null
 	$(VALGRIND) ./$(TARGET) -t localhost -p 21,25,110,143,465,587,993,995,5432 --sv --timeout 300 --json > /dev/null
 	@echo "valgrind: no leaks or memory errors"
 
@@ -117,6 +118,7 @@ $(TSAN_TARGET): $(SOURCES) | $(BUILD_DIR)/release
 	$(CC) $(CFLAGS) -g -O1 -fsanitize=thread $(SOURCES) -o $@
 tsan: $(TSAN_TARGET)
 	./$(TSAN_TARGET) -t 127.0.0.1 -p 1-3000 --threads 64 > /dev/null
+	./$(TSAN_TARGET) -t 127.0.0.0/28 -p 1-300 --adaptive --threads 64 --timeout 500 > /dev/null
 	./$(TSAN_TARGET) -t 127.0.0.0/29 --top-ports 100 --banner --threads 32 > /dev/null
 	./$(TSAN_TARGET) -t 127.0.0.0/29 --udp --threads 32 --timeout 200 > /dev/null
 	./$(TSAN_TARGET) -t 127.0.0.0/29 --top-ports 100 --sv --threads 32 --timeout 300 > /dev/null

@@ -101,6 +101,35 @@ keeps every thread busy; with one queue per host, 16 threads would wait on a
 unfinished ports, and the thread that finishes the last one records how long
 the host took.
 
+### How long to wait: `--adaptive`
+
+A fixed timeout is a guess. A LAN device answers in under a millisecond, a
+server across the world in 200 ms; a dropped SYN never answers. Waiting a
+full second per silent port is far too long on a LAN and may be too short
+over a bad link.
+
+TCP itself solved this long ago (RFC 6298): measure the round-trip time of
+every answer and keep two running numbers per host,
+
+```
+srtt   = 7/8 * srtt   + 1/8 * sample          (smoothed RTT)
+rttvar = 3/4 * rttvar + 1/4 * |srtt - sample| (how much it varies)
+timeout = srtt + 4 * rttvar
+```
+
+Janus times every answer: a SYN-ACK (open) or RST (closed) is one RTT. With
+`--adaptive`, the workers feed these samples into the host's estimate (a
+mutex per scan guards it) and, once 3 answers are in, give each new connect
+`timeout` instead of `--timeout`, never below 100 ms and never above
+`--timeout`. A port that stays silent is tried a second time, because one
+lost SYN looks exactly like a firewall; only then is it filtered.
+
+The result on a firewalled host: each filtered port costs about 2 × 100 ms
+instead of the full timeout. The trade-off is honest but real: a host that
+suddenly answers much slower than usual can have a port reported filtered,
+so `--adaptive` is opt-in. The latency itself (the median of all answers) is
+reported for every scan.
+
 ## 7. Skipping hosts that are down
 
 A whole subnet is mostly empty. For a silent host every port waits for the

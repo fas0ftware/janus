@@ -43,6 +43,7 @@ typedef struct {
     port_state state;
     int error_code;           /* errno value when state == PORT_ERROR, otherwise 0 */
     char banner[BANNER_SIZE]; /* "" unless --banner found one on an open port */
+    float rtt_ms;             /* how long the answer took (SYN-ACK, RST, UDP reply or ICMP); -1 if none */
     /*
      * --sv: what the port really runs, or NULL if nothing was recognized.
      * Heap allocated only for identified open ports (most ports are closed, so
@@ -70,6 +71,8 @@ typedef struct {
     int thread_count;
     bool grab_banner; /* read a short greeting from open ports (TCP only) */
     bool detect_version; /* --sv: probe open ports to identify service and version */
+    bool adaptive;       /* --adaptive: shorten the connect wait to what the host's measured RTT needs */
+    int connect_timeout_ms; /* set per port by the worker pool; 0 = use timeout_ms */
     scan_protocol protocol;
 } scan_settings;
 
@@ -136,6 +139,29 @@ void request_scan_stop(void);
 
 /* True once request_scan_stop() has been called. */
 bool scan_stop_requested(void);
+
+/*
+ * Smoothed round-trip time of one host (RFC 6298), updated by the workers as
+ * answers come in. --adaptive derives each connect timeout from it.
+ */
+typedef struct {
+    double srtt_ms;
+    double rttvar_ms;
+    unsigned samples;
+} rtt_estimate;
+
+/* Add one measured RTT to an estimate. */
+void rtt_add_sample(rtt_estimate *estimate, double rtt_ms);
+
+/*
+ * The connect timeout --adaptive uses: srtt + 4 * rttvar (the TCP
+ * retransmission timeout formula), at least ADAPTIVE_MIN_MS, at most
+ * max_timeout_ms. Until ADAPTIVE_MIN_SAMPLES answers were measured there is
+ * no trustworthy estimate, and max_timeout_ms is returned.
+ */
+#define ADAPTIVE_MIN_MS 100
+#define ADAPTIVE_MIN_SAMPLES 3
+int rtt_timeout_ms(const rtt_estimate *estimate, int max_timeout_ms);
 
 /* Turn a port_state into a printable word such as "open". */
 const char *port_state_to_string(port_state state);
