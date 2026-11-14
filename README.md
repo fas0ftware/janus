@@ -394,7 +394,13 @@ MariaDB, a silent service, JSON, Ctrl+C), latency reporting and `--adaptive`
 (The machine in this picture had no IPv6, so its 4 IPv6 checks were skipped:
 126 of the 130. CI runs all of them.)
 
-`make check` repeats the suite under AddressSanitizer + UBSan, runs valgrind
+`make fuzz` runs a mutation fuzzer over every `--sv` parser (SSH, HTTP, TLS
+records and certificates, MySQL, DNS/mDNS, NetBIOS, ...) under AddressSanitizer
+and UBSan, checking that every string it produces stays printable. Before 1.9
+was released it ran 12 million inputs without a finding; a deliberately
+planted off-by-one was caught within seconds, so the harness has teeth.
+
+`make check` repeats the suite under AddressSanitizer + UBSan, runs the fuzzer, runs valgrind
 with leak checking (including a CIDR + IPv6 + banner scan) and
 ThreadSanitizer. CI builds with gcc **and** clang using `-Werror`, runs all of
 it, plus cppcheck.

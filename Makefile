@@ -32,7 +32,7 @@ TARGET       := janus
 DEBUG_TARGET := janus-debug
 
 # These targets are commands, not files, so make must always run them.
-.PHONY: all debug clean test check test-debug memcheck tsan
+.PHONY: all debug clean test check test-debug memcheck tsan fuzz
 
 all: $(TARGET)
 
@@ -125,7 +125,16 @@ tsan: $(TSAN_TARGET)
 	./$(TSAN_TARGET) -t 127.0.0.0/26 -p 22,80 --discover --discover-ports 22,80,443,445 --threads 64 > /dev/null
 	@echo "tsan: no data races reported"
 
-check: test-debug memcheck tsan
+# Mutation fuzzer for the --sv parsers under ASan + UBSan. FUZZ_RUNS inputs per run.
+FUZZ_TARGET := $(BUILD_DIR)/fuzz_fingerprint
+FUZZ_RUNS ?= 300000
+$(FUZZ_TARGET): tests/fuzz_fingerprint.c tests/fuzz_certificate.inc src/fingerprint.c src/fingerprint.h | $(BUILD_DIR)/release
+	$(CC) $(CFLAGS) -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -I$(SRC_DIR) tests/fuzz_fingerprint.c $(SRC_DIR)/fingerprint.c -o $@
+fuzz: $(FUZZ_TARGET)
+	./$(FUZZ_TARGET) $(FUZZ_RUNS) 1
+	./$(FUZZ_TARGET) $(FUZZ_RUNS) 4242
+
+check: test-debug memcheck tsan fuzz
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET) $(DEBUG_TARGET)
