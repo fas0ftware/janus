@@ -396,8 +396,8 @@ MariaDB, a silent service, JSON, Ctrl+C), latency reporting and `--adaptive`
 
 `make fuzz` runs a mutation fuzzer over every `--sv` parser (SSH, HTTP, TLS
 records and certificates, MySQL, DNS/mDNS, NetBIOS, ...) under AddressSanitizer
-and UBSan, checking that every string it produces stays printable. Before 1.9
-was released it ran 12 million inputs without a finding; a deliberately
+and UBSan, checking that every string it produces stays printable. On 1.9
+it ran 12 million inputs without a finding; a deliberately
 planted off-by-one was caught within seconds, so the harness has teeth.
 
 `make check` repeats the suite under AddressSanitizer + UBSan, runs the fuzzer, runs valgrind
