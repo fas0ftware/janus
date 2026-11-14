@@ -24,6 +24,8 @@ enum {
     OPTION_OPEN,
     OPTION_DISCOVER,
     OPTION_DISCOVER_PORTS,
+    OPTION_SERVICE_VERSION,
+    OPTION_ADAPTIVE,
 };
 
 void print_usage(FILE *stream, const char *program_name)
@@ -43,8 +45,18 @@ void print_usage(FILE *stream, const char *program_name)
             "                        Silent ports are reported as open|filtered\n"
             "      --timeout <ms>    wait per port in milliseconds, %d-%d (default %d)\n"
             "      --threads <n>     parallel workers, 1-%d (default %d)\n"
+            "      --adaptive        measure each host's round-trip time and wait only as\n"
+            "                        long as it needs (at least 100 ms, at most --timeout);\n"
+            "                        silent ports are tried twice. TCP only\n"
             "      --banner          read a short greeting from open ports (HTTP ports\n"
             "                        get a HEAD request); nothing else is sent\n"
+            "      --sv              identify what really runs on open ports: service,\n"
+            "                        product and version (OpenSSH 9.6p1, nginx 1.24.0,\n"
+            "                        TLS 1.3, MySQL, ...). Silent ports get a TLS and an\n"
+            "                        HTTP probe. TLS ports show their certificate (name,\n"
+            "                        issuer, expiry, key); SMTP, IMAP, POP3, FTP and\n"
+            "                        PostgreSQL are asked for STARTTLS. With --udp,\n"
+            "                        replies are decoded\n"
             "      --open            with several hosts, list only hosts with open ports\n"
             "      --discover        first find which hosts answer (TCP probes, no root\n"
             "                        needed) and port-scan only those; down hosts are skipped\n"
@@ -228,6 +240,8 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
     options->thread_count = DEFAULT_THREAD_COUNT;
     options->json_output = false;
     options->grab_banner = false;
+    options->detect_version = false;
+    options->adaptive = false;
     options->open_only = false;
     options->family = 0;
     options->udp = false;
@@ -243,6 +257,9 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
         {"json", no_argument, NULL, OPTION_JSON},
         {"top-ports", required_argument, NULL, OPTION_TOP_PORTS},
         {"banner", no_argument, NULL, OPTION_BANNER},
+        {"sv", no_argument, NULL, OPTION_SERVICE_VERSION},
+        {"adaptive", no_argument, NULL, OPTION_ADAPTIVE},
+        {"service-version", no_argument, NULL, OPTION_SERVICE_VERSION},
         {"udp", no_argument, NULL, 'u'},
         {"open", no_argument, NULL, OPTION_OPEN},
         {"discover", no_argument, NULL, OPTION_DISCOVER},
@@ -271,6 +288,12 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
             break;
         case OPTION_BANNER:
             options->grab_banner = true;
+            break;
+        case OPTION_ADAPTIVE:
+            options->adaptive = true;
+            break;
+        case OPTION_SERVICE_VERSION:
+            options->detect_version = true;
             break;
         case OPTION_OPEN:
             options->open_only = true;
@@ -345,6 +368,11 @@ parse_status parse_arguments(int argc, char *argv[], scan_options *options)
 
     if (options->udp && options->grab_banner) {
         print_error("--banner works only with TCP scans");
+        return PARSE_ERROR;
+    }
+    if (options->udp && options->adaptive) {
+        /* UDP silence is an answer (open|filtered): shortening the wait would change results. */
+        print_error("--adaptive works only with TCP scans");
         return PARSE_ERROR;
     }
 

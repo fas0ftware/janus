@@ -2,8 +2,10 @@
 
 #include <stdbool.h> /* bool */
 #include <stdio.h>   /* printf, putchar, fputs */
+#include <stdlib.h>  /* malloc, free, qsort */
 #include <string.h>  /* strcmp, strerror */
 
+#include "fingerprint.h"
 #include "services.h"
 #include "utils.h"
 
@@ -81,9 +83,128 @@ size_t count_open_filtered(const scan_report *report)
     return count_in_state(report, PORT_OPEN_FILTERED);
 }
 
+static int compare_floats(const void *a, const void *b)
+{
+    float x = *(const float *)a;
+    float y = *(const float *)b;
+    return (x > y) - (x < y);
+}
+
+/*
+ * The host's latency: the median time its answers took (SYN-ACK, RST, UDP
+ * reply, ICMP error). The median ignores a few slow outliers. -1 if the host
+ * never answered (all ports filtered, or not scanned).
+ */
+static double median_latency_ms(const scan_report *report)
+{
+    size_t count = 0;
+    for (size_t i = 0; i < report->result_count; i++) {
+        count += report->results[i].rtt_ms >= 0.0f;
+    }
+    if (count == 0) {
+        return -1.0;
+    }
+    float *samples = malloc(count * sizeof *samples);
+    if (samples == NULL) {
+        return -1.0;
+    }
+    size_t used = 0;
+    for (size_t i = 0; i < report->result_count; i++) {
+        if (report->results[i].rtt_ms >= 0.0f) {
+            samples[used++] = report->results[i].rtt_ms;
+        }
+    }
+    qsort(samples, count, sizeof *samples, compare_floats);
+    double median = count % 2 ? samples[count / 2] : (samples[count / 2 - 1] + samples[count / 2]) / 2.0;
+    free(samples);
+    return median;
+}
+
 static const char *protocol_name(const scan_report *report)
 {
     return report->protocol == PROTOCOL_UDP ? "udp" : "tcp";
+}
+
+/*
+ * The SERVICE column: what --sv found if it found something, otherwise the
+ * name /etc/services gives the port number. TLS is shown together with the
+ * port's usual service, "tls/https", because --sv cannot look inside it.
+ */
+static const char *service_label(const port_result *result, const char *protocol, char *buffer, size_t size)
+{
+    const char *by_port = lookup_service_name(result->port, protocol);
+    if (result->detected == NULL || result->detected->service[0] == '\0') {
+        return by_port;
+    }
+    if (strcmp(result->detected->service, "tls") == 0 && strcmp(by_port, "unknown") != 0) {
+        snprintf(buffer, size, "tls/%.*s", (int)(size > 5 ? size - 5 : 0), by_port);
+        return buffer;
+    }
+    return result->detected->service;
+}
+
+/*
+ * Two lines under a TLS port: who the certificate is for and until when, then
+ * the names it is valid for. Problems are written in capitals so they stand out.
+ */
+static void print_certificate_text(const tls_certificate *certificate, const char *now)
+{
+    printf("%-10s cert: %s", "", certificate->subject[0] ? certificate->subject : "(no name)");
+    if (certificate->self_signed) {
+        printf(", self-signed");
+    } else if (certificate->issuer[0] != '\0') {
+        printf(", issuer %s", certificate->issuer);
+    }
+    printf(", valid until %.10s", certificate->not_after);
+    if (certificate->key[0] != '\0') {
+        printf(", %s", certificate->key);
+    }
+    if (certificate_expired(certificate, now)) {
+        printf(", EXPIRED");
+    } else if (certificate_not_yet_valid(certificate, now)) {
+        printf(", NOT YET VALID");
+    }
+    printf("\n");
+    if (certificate->name_count > 0) {
+        printf("%-10s names: ", "");
+        for (size_t i = 0; i < certificate->name_count; i++) {
+            printf("%s%s", i ? ", " : "", certificate->names[i]);
+        }
+        printf("\n");
+    }
+}
+
+/* PORT, STATE, SERVICE and VERSION; certificate and banner go on their own lines below. */
+static void print_version_table(const scan_report *report, int state_width)
+{
+    const char *protocol = protocol_name(report);
+    printf("%-10s %-*s %-16s %s\n", "PORT", state_width, "STATE", "SERVICE", "VERSION");
+    for (size_t i = 0; i < report->result_count; i++) {
+        const port_result *result = &report->results[i];
+        if (result->state != PORT_OPEN && result->state != PORT_OPEN_FILTERED) {
+            continue;
+        }
+        char port_label[16];
+        char service_buffer[40];
+        char version[DETECTED_PRODUCT_SIZE + DETECTED_VERSION_SIZE + DETECTED_INFO_SIZE + 8] = "";
+        snprintf(port_label, sizeof port_label, "%u/%s", (unsigned)result->port, protocol);
+        if (result->detected != NULL) {
+            format_detected_version(result->detected, version, sizeof version);
+        }
+        printf("%-10s %-*s %-16s %s\n", port_label, state_width, port_state_to_string(result->state),
+               service_label(result, protocol, service_buffer, sizeof service_buffer), version[0] ? version : "-");
+        if (result->detected != NULL && result->detected->starttls_status == STARTTLS_OK) {
+            printf("%-10s starttls: %s\n", "", result->detected->starttls);
+        } else if (result->detected != NULL && result->detected->starttls_status == STARTTLS_NOT_OFFERED) {
+            printf("%-10s starttls: NOT OFFERED (logins travel in clear text)\n", "");
+        }
+        if (result->detected != NULL && result->detected->certificate.present) {
+            print_certificate_text(&result->detected->certificate, report->started_at);
+        }
+        if (report->show_banner && result->banner[0] != '\0') {
+            printf("%-10s banner: %s\n", "", result->banner);
+        }
+    }
 }
 
 /*
@@ -95,6 +216,10 @@ static void print_open_table(const scan_report *report)
     const char *protocol = protocol_name(report);
     int state_width = report->protocol == PROTOCOL_UDP ? 14 : 8;
 
+    if (report->show_version) {
+        print_version_table(report, state_width);
+        return;
+    }
     /* %-10s pads to 10 columns, left aligned, so columns line up. */
     if (report->show_banner) {
         printf("%-10s %-*s %-16s %s\n", "PORT", state_width, "STATE", "SERVICE", "BANNER");
@@ -151,6 +276,10 @@ void print_result_text(const scan_report *report)
         printf(", %zu not scanned", counts.not_scanned);
     }
     printf("\n");
+    double latency = median_latency_ms(report);
+    if (latency >= 0.0) {
+        printf("Latency: %.2f ms (median of the host's answers)\n", latency);
+    }
 
     print_warnings(report, &counts);
 }
@@ -199,6 +328,63 @@ static void print_json_string(const char *text)
     putchar('"');
 }
 
+/* --sv result of one port: an object with four strings ("" = unknown), or null if nothing was recognized. */
+static void print_certificate_json(const tls_certificate *certificate, const char *now)
+{
+    printf(", \"certificate\": ");
+    if (!certificate->present) {
+        printf("null");
+        return;
+    }
+    printf("{\"subject\": ");
+    print_json_string(certificate->subject);
+    printf(", \"issuer\": ");
+    print_json_string(certificate->issuer);
+    printf(", \"self_signed\": %s, \"not_before\": ", certificate->self_signed ? "true" : "false");
+    print_json_string(certificate->not_before);
+    printf(", \"not_after\": ");
+    print_json_string(certificate->not_after);
+    printf(", \"expired\": %s, \"not_yet_valid\": %s, \"key\": ",
+           certificate_expired(certificate, now) ? "true" : "false",
+           certificate_not_yet_valid(certificate, now) ? "true" : "false");
+    print_json_string(certificate->key);
+    printf(", \"names\": [");
+    for (size_t i = 0; i < certificate->name_count; i++) {
+        printf("%s", i ? ", " : "");
+        print_json_string(certificate->names[i]);
+    }
+    printf("]}");
+}
+
+static void print_detected_json(const service_info *detected, const char *now)
+{
+    printf(", \"detected\": ");
+    if (detected == NULL) {
+        printf("null");
+        return;
+    }
+    printf("{\"service\": ");
+    print_json_string(detected->service);
+    printf(", \"product\": ");
+    print_json_string(detected->product);
+    printf(", \"version\": ");
+    print_json_string(detected->version);
+    printf(", \"info\": ");
+    print_json_string(detected->info);
+    printf(", \"starttls\": ");
+    if (detected->starttls_status == STARTTLS_NOT_APPLICABLE) {
+        printf("null");
+    } else if (detected->starttls_status == STARTTLS_NOT_OFFERED) {
+        printf("{\"offered\": false}");
+    } else {
+        printf("{\"offered\": true, \"tls\": ");
+        print_json_string(detected->starttls);
+        printf("}");
+    }
+    print_certificate_json(&detected->certificate, now);
+    printf("}");
+}
+
 /* One JSON array of the ports in a given state, e.g. "open_ports": [ {...}, {...} ], with a trailing comma. */
 static void print_port_array(const scan_report *report, const char *pad, const char *key, port_state wanted)
 {
@@ -217,6 +403,9 @@ static void print_port_array(const scan_report *report, const char *pad, const c
         if (wanted == PORT_OPEN && report->show_banner) {
             printf(", \"banner\": ");
             print_json_string(result->banner);
+        }
+        if (wanted == PORT_OPEN && report->show_version) {
+            print_detected_json(result->detected, report->started_at);
         }
         printf("}");
         first = false;
@@ -242,6 +431,12 @@ static void print_host_fields(const scan_report *report, const char *pad, const 
     }
     /* Whole milliseconds: integers are simpler for other programs to read. */
     printf("%s\"duration_ms\": %.0f,\n", pad, report->duration_ms);
+    double latency = median_latency_ms(report);
+    if (latency >= 0.0) {
+        printf("%s\"latency_ms\": %.3f,\n", pad, latency);
+    } else {
+        printf("%s\"latency_ms\": null,\n", pad);
+    }
     printf("%s\"ports_requested\": %zu,\n", pad, report->result_count);
     printf("%s\"ports_scanned\": %zu,\n", pad, report->result_count - counts->not_scanned);
     printf("%s\"interrupted\": %s,\n", pad, report->interrupted ? "true" : "false");
@@ -311,6 +506,10 @@ void print_multi_text(const scan_report *reports, size_t count, bool open_only, 
             printf("%zu open", open);
             if (uncertain > 0) {
                 printf(", %zu open|filtered", uncertain);
+            }
+            double latency = median_latency_ms(report);
+            if (latency >= 0.0) {
+                printf(", latency %.2f ms", latency);
             }
             printf("\n");
             print_open_table(report);

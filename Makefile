@@ -32,7 +32,7 @@ TARGET       := janus
 DEBUG_TARGET := janus-debug
 
 # These targets are commands, not files, so make must always run them.
-.PHONY: all debug clean test check test-debug memcheck tsan
+.PHONY: all debug clean test check test-debug memcheck tsan fuzz
 
 all: $(TARGET)
 
@@ -75,9 +75,15 @@ UDP_TEST := $(BUILD_DIR)/test_udp
 $(UDP_TEST): tests/test_udp.c $(SOURCES) | $(BUILD_DIR)/release
 	$(CC) $(CFLAGS) -g -fsanitize=address,undefined -I$(SRC_DIR) tests/test_udp.c $(LIB_SOURCES) -o $@
 
-test: $(TARGET) $(JSON_TEST) $(TARGETS_TEST) $(UDP_TEST)
+# Unit tests for --sv: service fingerprints and the probes Janus sends.
+FINGERPRINT_TEST := $(BUILD_DIR)/test_fingerprint
+$(FINGERPRINT_TEST): tests/test_fingerprint.c $(SOURCES) | $(BUILD_DIR)/release
+	$(CC) $(CFLAGS) -g -fsanitize=address,undefined -I$(SRC_DIR) tests/test_fingerprint.c $(LIB_SOURCES) -o $@
+
+test: $(TARGET) $(JSON_TEST) $(TARGETS_TEST) $(UDP_TEST) $(FINGERPRINT_TEST)
 	./$(TARGETS_TEST)
 	./$(UDP_TEST)
+	./$(FINGERPRINT_TEST)
 	JSON_TEST=$(JSON_TEST) ./tests/run_tests.sh
 
 # --- Hardening checks ---------------------------------------------------------
@@ -99,6 +105,10 @@ memcheck: $(TARGET)
 	$(VALGRIND) ./$(TARGET) -t 127.0.0.0/29 -p 22 --discover-ports 1,2,3 --timeout 200 > /dev/null
 	$(VALGRIND) ./$(TARGET) -t 127.0.0.0/29 --udp -p 53,123,161 --timeout 200 --json > /dev/null
 	$(VALGRIND) ./$(TARGET) -t 127.0.0.1 --udp --banner 2> /dev/null; test $$? -eq 2
+	$(VALGRIND) ./$(TARGET) -t 127.0.0.0/30,::1 -p 22,80,443,631,8000 --sv --banner --timeout 300 --json > /dev/null
+	$(VALGRIND) ./$(TARGET) -t 127.0.0.1 --udp --sv --timeout 200 > /dev/null
+	$(VALGRIND) ./$(TARGET) -t 127.0.0.0/30 -p 1-200 --adaptive --timeout 300 --json > /dev/null
+	$(VALGRIND) ./$(TARGET) -t localhost -p 21,25,110,143,465,587,993,995,5432 --sv --timeout 300 --json > /dev/null
 	@echo "valgrind: no leaks or memory errors"
 
 # ThreadSanitizer finds data races between threads. It cannot be combined
@@ -108,12 +118,23 @@ $(TSAN_TARGET): $(SOURCES) | $(BUILD_DIR)/release
 	$(CC) $(CFLAGS) -g -O1 -fsanitize=thread $(SOURCES) -o $@
 tsan: $(TSAN_TARGET)
 	./$(TSAN_TARGET) -t 127.0.0.1 -p 1-3000 --threads 64 > /dev/null
+	./$(TSAN_TARGET) -t 127.0.0.0/28 -p 1-300 --adaptive --threads 64 --timeout 500 > /dev/null
 	./$(TSAN_TARGET) -t 127.0.0.0/29 --top-ports 100 --banner --threads 32 > /dev/null
 	./$(TSAN_TARGET) -t 127.0.0.0/29 --udp --threads 32 --timeout 200 > /dev/null
+	./$(TSAN_TARGET) -t 127.0.0.0/29 --top-ports 100 --sv --threads 32 --timeout 300 > /dev/null
 	./$(TSAN_TARGET) -t 127.0.0.0/26 -p 22,80 --discover --discover-ports 22,80,443,445 --threads 64 > /dev/null
 	@echo "tsan: no data races reported"
 
-check: test-debug memcheck tsan
+# Mutation fuzzer for the --sv parsers under ASan + UBSan. FUZZ_RUNS inputs per run.
+FUZZ_TARGET := $(BUILD_DIR)/fuzz_fingerprint
+FUZZ_RUNS ?= 300000
+$(FUZZ_TARGET): tests/fuzz_fingerprint.c tests/fuzz_certificate.inc src/fingerprint.c src/fingerprint.h | $(BUILD_DIR)/release
+	$(CC) $(CFLAGS) -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -I$(SRC_DIR) tests/fuzz_fingerprint.c $(SRC_DIR)/fingerprint.c -o $@
+fuzz: $(FUZZ_TARGET)
+	./$(FUZZ_TARGET) $(FUZZ_RUNS) 1
+	./$(FUZZ_TARGET) $(FUZZ_RUNS) 4242
+
+check: test-debug memcheck tsan fuzz
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET) $(DEBUG_TARGET)

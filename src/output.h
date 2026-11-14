@@ -18,6 +18,7 @@ typedef struct {
     double duration_ms;
     bool interrupted; /* true if the user pressed Ctrl+C */
     bool show_banner; /* --banner was given */
+    bool show_version; /* --sv was given: VERSION column and "detected" in JSON */
     bool resolved;    /* false if the host could not be resolved (multi-host runs) */
     host_status status; /* result of --discover; HOST_STATUS_UNKNOWN if it was not used */
     scan_protocol protocol; /* tcp or udp: decides labels, the state column and JSON keys */

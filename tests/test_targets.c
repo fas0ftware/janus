@@ -81,5 +81,26 @@ int main(void)
     }
     CHECK(!duplicate && top_ports[0] == 80, "top ports are unique and start with 80");
 
+    /* --adaptive: RFC 6298 smoothing and the timeout derived from it. */
+    rtt_estimate estimate = {0, 0, 0};
+    rtt_add_sample(&estimate, 1.0);
+    rtt_add_sample(&estimate, 1.0);
+    CHECK(rtt_timeout_ms(&estimate, 1000) == 1000, "adaptive: full timeout until 3 answers were measured");
+    rtt_add_sample(&estimate, 1.0);
+    CHECK(rtt_timeout_ms(&estimate, 1000) == ADAPTIVE_MIN_MS, "adaptive: a fast LAN host gets the 100 ms floor");
+    CHECK(rtt_timeout_ms(&estimate, 50) == 50, "adaptive: never longer than --timeout, even below the floor");
+    rtt_estimate slow = {0, 0, 0};
+    for (int i = 0; i < 3; i++) {
+        rtt_add_sample(&slow, 200.0);
+    }
+    /* srtt 200, rttvar 100 -> 75 -> 56.25: 200 + 4 * 56.25 = 425 */
+    CHECK(slow.samples == 3 && slow.srtt_ms == 200.0 && slow.rttvar_ms == 56.25 && rtt_timeout_ms(&slow, 5000) == 425,
+          "adaptive: srtt + 4 * rttvar for a steady 200 ms host");
+    CHECK(rtt_timeout_ms(&slow, 300) == 300, "adaptive: clamped to --timeout");
+    rtt_estimate jitter = slow;
+    rtt_add_sample(&jitter, 800.0);
+    CHECK(rtt_timeout_ms(&jitter, 5000) > rtt_timeout_ms(&slow, 5000) + 300,
+          "adaptive: one slow answer widens the timeout");
+
     return failures == 0 ? 0 : 1;
 }

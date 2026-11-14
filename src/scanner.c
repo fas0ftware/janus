@@ -1,6 +1,6 @@
 #include "scanner.h"
 
-#include <arpa/inet.h>  /* inet_ntop, htons */
+#include <arpa/inet.h>  /* inet_ntop, inet_pton, htons */
 #include <errno.h>      /* errno, EINPROGRESS, ECONNREFUSED, ... */
 #include <fcntl.h>      /* fcntl, O_NONBLOCK */
 #include <netdb.h>      /* getaddrinfo, freeaddrinfo, gai_strerror */
@@ -15,6 +15,7 @@
 #include <unistd.h>     /* close */
 
 #include "udp_scan.h"
+#include "version_scan.h"
 #include "utils.h"
 
 /* Longest single poll() wait, so a stop request is noticed quickly. */
@@ -77,6 +78,13 @@ int resolve_target(const char *host, address_family family, scan_target *target)
     target->address_length = chosen->ai_addrlen;
     target->family = chosen->ai_family;
     freeaddrinfo(results);
+
+    /* Keep a host name (not an address literal) for TLS SNI. */
+    unsigned char literal[sizeof(struct in6_addr)];
+    if (inet_pton(AF_INET, host, literal) != 1 && inet_pton(AF_INET6, host, literal) != 1 &&
+        strlen(host) < sizeof target->host_name) {
+        memcpy(target->host_name, host, strlen(host) + 1);
+    }
 
     /* Binary address -> "127.0.0.1" or "::1" for display. */
     const void *raw = target->family == AF_INET
@@ -233,8 +241,7 @@ void sanitize_banner(const char *raw, size_t raw_length, char *out, size_t out_s
     out[written] = '\0';
 }
 
-/* Ports where services wait for the client to speak HTTP first. */
-static bool is_http_port(uint16_t port)
+bool is_http_port(uint16_t port)
 {
     static const uint16_t http_ports[] = {80, 591, 631, 3000, 5000, 8000, 8008, 8080, 8081, 8888};
     for (size_t i = 0; i < sizeof http_ports / sizeof http_ports[0]; i++) {
@@ -245,8 +252,7 @@ static bool is_http_port(uint16_t port)
     return false;
 }
 
-/* Wait (in stop-aware slices) until fd is readable or the deadline passes. */
-static bool wait_readable(int fd, double deadline_ms)
+bool wait_for_data(int fd, double deadline_ms)
 {
     struct pollfd watch = {.fd = fd, .events = POLLIN, .revents = 0};
     for (;;) {
@@ -274,19 +280,15 @@ static void read_banner(int fd, const scan_target *target, uint16_t port, int ti
                         size_t banner_size)
 {
     banner[0] = '\0';
-    int budget_ms = timeout_ms < 1500 ? timeout_ms : 1500;
+    int budget_ms = service_wait_ms(timeout_ms);
     if (is_http_port(port)) {
-        /* Some servers (e.g. CUPS) refuse requests without a Host header. */
-        char probe[128];
-        int length = snprintf(probe, sizeof probe, "HEAD / HTTP/1.0\r\nHost: %s%s%s\r\n\r\n",
-                              target->family == AF_INET6 ? "[" : "", target->ip_text,
-                              target->family == AF_INET6 ? "]" : "");
-        if (length <= 0 || (size_t)length >= sizeof probe ||
-            send(fd, probe, (size_t)length, MSG_NOSIGNAL) != (ssize_t)length) {
+        char probe[HTTP_REQUEST_MAX];
+        size_t length = http_head_request(target, probe, sizeof probe);
+        if (length == 0 || send(fd, probe, length, MSG_NOSIGNAL) != (ssize_t)length) {
             return;
         }
     }
-    if (!wait_readable(fd, monotonic_time_ms() + budget_ms)) {
+    if (!wait_for_data(fd, monotonic_time_ms() + budget_ms)) {
         return;
     }
     char raw[512];
@@ -296,30 +298,66 @@ static void read_banner(int fd, const scan_target *target, uint16_t port, int ti
     }
 }
 
-port_result scan_port(const scan_target *target, uint16_t port, const scan_settings *settings)
+/* Copy the resolved address and fill in the port for this attempt. */
+static struct sockaddr_storage address_with_port(const scan_target *target, uint16_t port)
 {
-    if (settings->protocol == PROTOCOL_UDP) {
-        return scan_udp_port(target, port, settings);
-    }
-    /* Copy the resolved address and fill in the port for this attempt. */
     struct sockaddr_storage address = target->address;
     if (target->family == AF_INET) {
         ((struct sockaddr_in *)&address)->sin_port = htons(port); /* host -> network byte order */
     } else {
         ((struct sockaddr_in6 *)&address)->sin6_port = htons(port);
     }
+    return address;
+}
 
-    port_result result = {.port = port, .state = PORT_NOT_SCANNED, .error_code = 0, .banner = ""};
+int connect_tcp_port(const scan_target *target, uint16_t port, int timeout_ms)
+{
+    struct sockaddr_storage address = address_with_port(target, port);
+    int error_code = 0;
+    int fd = -1;
+    connect_with_timeout((const struct sockaddr *)&address, target->address_length, timeout_ms, &error_code, &fd);
+    return fd;
+}
+
+port_result scan_port(const scan_target *target, uint16_t port, const scan_settings *settings)
+{
+    if (settings->protocol == PROTOCOL_UDP) {
+        return scan_udp_port(target, port, settings);
+    }
+    struct sockaddr_storage address = address_with_port(target, port);
+
+    port_result result = {
+        .port = port, .state = PORT_NOT_SCANNED, .error_code = 0, .banner = "", .rtt_ms = -1.0f, .detected = NULL};
     int open_fd = -1;
-    result.state = connect_with_timeout((const struct sockaddr *)&address, target->address_length,
-                                        settings->timeout_ms, &result.error_code, &open_fd);
+    int connect_ms = settings->connect_timeout_ms > 0 ? settings->connect_timeout_ms : settings->timeout_ms;
+    double started_ms = monotonic_time_ms();
+    result.state = connect_with_timeout((const struct sockaddr *)&address, target->address_length, connect_ms,
+                                        &result.error_code, &open_fd);
+    if (result.state == PORT_OPEN || result.state == PORT_CLOSED) {
+        result.rtt_ms = (float)(monotonic_time_ms() - started_ms); /* SYN -> SYN-ACK or RST */
+    }
     if (open_fd != -1) {
-        if (settings->grab_banner) {
-            read_banner(open_fd, target, port, settings->timeout_ms, result.banner, sizeof result.banner);
+        if (settings->detect_version) {
+            detect_tcp_service(target, open_fd, settings, &result); /* closes open_fd */
+        } else {
+            if (settings->grab_banner) {
+                read_banner(open_fd, target, port, settings->timeout_ms, result.banner, sizeof result.banner);
+            }
+            close(open_fd);
         }
-        close(open_fd);
     }
     return result;
+}
+
+void free_port_details(port_result *results, size_t count)
+{
+    if (results == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        free(results[i].detected);
+        results[i].detected = NULL;
+    }
 }
 
 /*
@@ -343,7 +381,65 @@ typedef struct {
     atomic_size_t *remaining;  /* per host: ports not finished yet */
     atomic_llong *started_us;  /* per host: monotonic microseconds when its first port started */
     double *host_ms;           /* per host: written once, by the thread that finishes its last port */
+    rtt_estimate *rtt;         /* per host, guarded by rtt_lock (--adaptive) */
+    pthread_mutex_t rtt_lock;
 } scan_queue;
+
+void rtt_add_sample(rtt_estimate *estimate, double rtt_ms)
+{
+    if (estimate->samples == 0) {
+        estimate->srtt_ms = rtt_ms;
+        estimate->rttvar_ms = rtt_ms / 2.0;
+    } else {
+        double difference = estimate->srtt_ms > rtt_ms ? estimate->srtt_ms - rtt_ms : rtt_ms - estimate->srtt_ms;
+        estimate->rttvar_ms = 0.75 * estimate->rttvar_ms + 0.25 * difference;
+        estimate->srtt_ms = 0.875 * estimate->srtt_ms + 0.125 * rtt_ms;
+    }
+    estimate->samples++;
+}
+
+int rtt_timeout_ms(const rtt_estimate *estimate, int max_timeout_ms)
+{
+    if (estimate->samples < ADAPTIVE_MIN_SAMPLES) {
+        return max_timeout_ms;
+    }
+    double timeout = estimate->srtt_ms + 4.0 * estimate->rttvar_ms;
+    if (timeout < ADAPTIVE_MIN_MS) {
+        timeout = ADAPTIVE_MIN_MS;
+    }
+    if (timeout >= max_timeout_ms) {
+        return max_timeout_ms;
+    }
+    int rounded = (int)timeout;
+    return rounded < timeout ? rounded + 1 : rounded; /* round up: never wait less than the formula says */
+}
+
+/*
+ * One TCP port with --adaptive: wait only as long as this host's answers
+ * suggest. Silence is retried once (a lost SYN looks the same as a firewall)
+ * before the port is called filtered.
+ */
+static port_result scan_port_adaptive(scan_queue *queue, size_t host, uint16_t port)
+{
+    scan_settings settings = *queue->settings;
+    port_result result = {.port = port, .state = PORT_NOT_SCANNED, .rtt_ms = -1.0f};
+    for (int attempt = 0; attempt < 2; attempt++) {
+        pthread_mutex_lock(&queue->rtt_lock);
+        settings.connect_timeout_ms = rtt_timeout_ms(&queue->rtt[host], queue->settings->timeout_ms);
+        pthread_mutex_unlock(&queue->rtt_lock);
+
+        result = scan_port(&queue->targets[host], port, &settings);
+        if (result.rtt_ms >= 0) {
+            pthread_mutex_lock(&queue->rtt_lock);
+            rtt_add_sample(&queue->rtt[host], result.rtt_ms);
+            pthread_mutex_unlock(&queue->rtt_lock);
+        }
+        if (result.state != PORT_FILTERED || settings.connect_timeout_ms >= queue->settings->timeout_ms) {
+            break; /* an answer, or silence after the full timeout: nothing to retry */
+        }
+    }
+    return result;
+}
 
 /* Thread body: keep claiming jobs until none are left or Ctrl+C was pressed. */
 static void *scan_worker(void *argument)
@@ -365,7 +461,11 @@ static void *scan_worker(void *argument)
         }
 
         port_result *slot = &queue->results[job];
-        *slot = scan_port(&queue->targets[host], slot->port, queue->settings);
+        if (queue->settings->adaptive && queue->settings->protocol == PROTOCOL_TCP) {
+            *slot = scan_port_adaptive(queue, host, slot->port);
+        } else {
+            *slot = scan_port(&queue->targets[host], slot->port, queue->settings);
+        }
 
         /* The thread that finishes the host's last port records how long the host took. */
         if (atomic_fetch_sub(&queue->remaining[host], 1) == 1) {
@@ -401,19 +501,22 @@ int scan_host_ports(const scan_target *targets, const bool *scan_host, size_t ho
     atomic_init(&queue.next_job, 0);
     queue.remaining = calloc(host_count, sizeof *queue.remaining);
     queue.started_us = calloc(host_count, sizeof *queue.started_us);
+    queue.rtt = calloc(host_count, sizeof *queue.rtt);
     /* More threads than ports to scan would only sit idle. */
     size_t wanted = (size_t)settings->thread_count;
     if (wanted > scanned_hosts * ports_per_host) {
         wanted = scanned_hosts * ports_per_host;
     }
     pthread_t *threads = calloc(wanted, sizeof *threads);
-    if (queue.remaining == NULL || queue.started_us == NULL || threads == NULL) {
+    if (queue.remaining == NULL || queue.started_us == NULL || queue.rtt == NULL || threads == NULL) {
         print_error("out of memory");
         free(queue.remaining);
         free(queue.started_us);
+        free(queue.rtt);
         free(threads);
         return -1;
     }
+    pthread_mutex_init(&queue.rtt_lock, NULL);
     for (size_t h = 0; h < host_count; h++) {
         atomic_init(&queue.remaining[h], ports_per_host);
         atomic_init(&queue.started_us[h], 0);
@@ -445,6 +548,8 @@ int scan_host_ports(const scan_target *targets, const bool *scan_host, size_t ho
     free(threads);
     free(queue.remaining);
     free(queue.started_us);
+    free(queue.rtt);
+    pthread_mutex_destroy(&queue.rtt_lock);
     return 0;
 }
 

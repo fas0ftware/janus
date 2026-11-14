@@ -101,6 +101,35 @@ keeps every thread busy; with one queue per host, 16 threads would wait on a
 unfinished ports, and the thread that finishes the last one records how long
 the host took.
 
+### How long to wait: `--adaptive`
+
+A fixed timeout is a guess. A LAN device answers in under a millisecond, a
+server across the world in 200 ms; a dropped SYN never answers. Waiting a
+full second per silent port is far too long on a LAN and may be too short
+over a bad link.
+
+TCP itself solved this long ago (RFC 6298): measure the round-trip time of
+every answer and keep two running numbers per host,
+
+```
+srtt   = 7/8 * srtt   + 1/8 * sample          (smoothed RTT)
+rttvar = 3/4 * rttvar + 1/4 * |srtt - sample| (how much it varies)
+timeout = srtt + 4 * rttvar
+```
+
+Janus times every answer: a SYN-ACK (open) or RST (closed) is one RTT. With
+`--adaptive`, the workers feed these samples into the host's estimate (a
+mutex per scan guards it) and, once 3 answers are in, give each new connect
+`timeout` instead of `--timeout`, never below 100 ms and never above
+`--timeout`. A port that stays silent is tried a second time, because one
+lost SYN looks exactly like a firewall; only then is it filtered.
+
+The result on a firewalled host: each filtered port costs about 2 × 100 ms
+instead of the full timeout. The trade-off is honest but real: a host that
+suddenly answers much slower than usual can have a port reported filtered,
+so `--adaptive` is opt-in. The latency itself (the median of all answers) is
+reported for every scan.
+
 ## 7. Skipping hosts that are down
 
 A whole subnet is mostly empty. For a silent host every port waits for the
@@ -149,7 +178,132 @@ second per remote host). Against a remote host a fast scan can lose some of
 them, and those closed ports then show up as `open|filtered`. Loopback is
 exempt from the limit, which is why the tests can use closed UDP ports.
 
-## 9. Stopping cleanly
+## 9. What really runs there (`--sv`)
+
+A port number is only a convention: `8000` can be a Python dev server, `2222`
+an SSH daemon, `443` anything at all. `/etc/services` only knows the
+convention. With `--sv` Janus talks to every open port just enough to hear the
+service name itself:
+
+| Probe (one connection each)                 | Reply that identifies it                                 |
+|---------------------------------------------|----------------------------------------------------------|
+| nothing: wait for a greeting                | `SSH-2.0-OpenSSH_9.6p1`, `220 (vsFTPd 3.0.5)`, `+OK Dovecot`, `RFB 003.008`, a MySQL handshake packet, telnet option bytes |
+| a TLS **ClientHello**                       | a **ServerHello**: Janus reads the chosen protocol version and cipher suite |
+| `HEAD / HTTP/1.0`                           | `HTTP/1.1 200 OK` + `Server: nginx/1.24.0 (Ubuntu)`, or Redis' `-ERR unknown command` |
+| PostgreSQL `SSLRequest` (5432, 5433 only)   | one byte, `S` or `N`                                      |
+
+The first probe depends on the port: HTTP ports start with `HEAD`, TLS ports
+(443, 993, 8443, ...) with the ClientHello, everything else by listening. If
+that stays silent, Janus opens a new connection and tries the ClientHello,
+then `HEAD`. It stops at the first reply it recognizes, and a service that
+greets in a protocol Janus does not know is left alone after the greeting.
+
+Why the TLS probe comes before `HEAD`: a plain HTTP server answers the
+ClientHello with `400 Bad Request` (still recognized as HTTP), but an HTTPS
+server like nginx answers a plaintext `HEAD` with a perfectly valid HTTP
+error, so the other order would report `http` and hide the TLS.
+
+### The TLS probe
+
+The ClientHello is written byte by byte in `fingerprint.c`: TLS 1.3 and 1.2,
+common AEAD cipher suites plus a few old ones, and an X25519 key share, so a
+modern server answers with a real ServerHello right away. A TLS 1.3 server
+writes `0x0303` (TLS 1.2) in the old version field for compatibility and puts
+the real version into the `supported_versions` extension, so Janus walks the
+extension list to find it. The handshake is never finished: as soon as the
+ServerHello is in, the connection is closed. Janus has no TLS library and
+cannot look inside the encrypted stream, so `443` shows up as `tls/https`
+with `TLS 1.3, TLS_AES_256_GCM_SHA384`, not as the web server behind it.
+
+When the target was given by name, the ClientHello carries it as **SNI**
+(server name indication). A server that hosts several sites picks its
+certificate by that name; without it, you would see the default site's.
+IP addresses are never sent as SNI (the standard forbids it).
+
+### The certificate
+
+In TLS 1.2 and older the server sends its certificate chain right after the
+ServerHello, **unencrypted**, before any key is agreed. The first certificate
+in the chain is the server's own. Janus keeps reading until it is complete;
+the server's first flight may split it over several TLS records, so the
+handshake messages are first reassembled into one stream.
+
+TLS 1.3 encrypts the certificate. For a 1.3 server Janus therefore opens one
+more connection with a ClientHello that offers only TLS 1.2. Most servers
+still accept 1.2 and send the certificate in clear text; a server that
+refuses everything below 1.3 answers with an alert, and the certificate is
+reported as unknown rather than guessed.
+
+The certificate itself is X.509 in DER: nested tag-length-value elements.
+`parse_certificate()` walks the structure with one rule: no length is
+followed unless it fits inside the element around it. It reads:
+
+```
+Certificate
+  tbsCertificate
+    [0] version, serialNumber, signature algorithm
+    issuer      -> common name (CN), else organization (O)
+    validity    -> notBefore, notAfter (UTCTime or GeneralizedTime)
+    subject     -> CN or O; identical issuer and subject = self-signed
+    subjectPublicKeyInfo -> RSA (modulus size), EC (curve), Ed25519
+    [3] extensions -> subjectAltName: DNS names and IP addresses
+```
+
+Times become ISO 8601 (`2027-01-31T12:00:00Z`), so "expired" is a plain
+string comparison with the scan's start time. Janus reports the certificate,
+it does not verify it: there is no signature or CA chain check.
+
+### Untrusted bytes
+
+Every reply comes from a peer that might be hostile. The parsers in
+`fingerprint.c` are pure functions over `(bytes, length)`: they check every
+length field against the bytes actually received before following it, DNS
+name compression may only point backwards (no loops), and every string they
+produce is printable ASCII, the same rule as for banners. The unit tests feed
+them truncated packets, lying length fields and terminal escape codes under
+AddressSanitizer.
+
+### STARTTLS
+
+Mail and file transfer protocols are older than TLS, so they start in plain
+text and switch on request. After identifying such a service Janus opens one
+more connection and asks:
+
+| Service    | Conversation                                             |
+|------------|----------------------------------------------------------|
+| SMTP       | greeting, `EHLO janus.invalid`, reply must list `STARTTLS`, `STARTTLS` → `220` |
+| IMAP       | greeting, `J1 STARTTLS` → `J1 OK` (untagged lines may come first) |
+| POP3       | greeting, `STLS` → `+OK`                                 |
+| FTP        | greeting, `AUTH TLS` → `234`                             |
+| PostgreSQL | `SSLRequest` → `S` (the first probe already got `S` or `N`) |
+
+Then it sends the same ClientHello as for a TLS port, and reads the TLS
+version and certificate the same way (with the TLS 1.2 follow-up for 1.3
+servers). A refusal is a finding of its own: the server makes clients log in
+over plain text. The `EHLO` name uses the reserved `.invalid` domain, so it
+reveals nothing about the scanning machine. SMTP and FTP replies may span
+several lines (`250-...`, then `250 ...`): Janus reads until the line where a
+space follows the code.
+
+### UDP
+
+UDP replies are already in hand after the scan, so `--sv --udp` costs nothing
+extra: DNS (recursion available? refused?), NTP (version, stratum, the clock
+of a stratum 1 server), NetBIOS (computer name and workgroup), SSDP (the UPnP
+software in the `SERVER` header) and mDNS (the advertised service types such as
+`_ipp._tcp` or `_airplay._tcp`) are decoded.
+
+### Cost and footprint
+
+A service that greets costs nothing extra. A silent one costs up to three
+waits of `--timeout` (at most 1.5 s each) and two more connections; a TLS 1.3
+server one more connection for its certificate, a mail or FTP server one or
+two more for STARTTLS. Every
+probe is a fixed, harmless message: no logins, no guessed passwords, nothing
+that changes state on the server. The extra connections do show up in the
+service's logs.
+
+## 10. Stopping cleanly
 
 `Ctrl+C` sends `SIGINT`. Janus' signal handler only sets an atomic flag (doing
 more inside a signal handler is unsafe). Workers check the flag before taking a
