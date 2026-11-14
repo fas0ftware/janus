@@ -41,13 +41,22 @@ typedef struct {
     size_t name_count;
 } tls_certificate;
 
+/* Whether a plaintext protocol (SMTP, IMAP, POP3, FTP, PostgreSQL) could be upgraded to TLS. */
+typedef enum {
+    STARTTLS_NOT_APPLICABLE, /* not a protocol with an upgrade command, or not tried */
+    STARTTLS_NOT_OFFERED,    /* the server does not offer TLS: logins travel in clear text */
+    STARTTLS_OK,             /* upgraded; .starttls holds the TLS version and cipher */
+} starttls_state;
+
 /* What a probe found out about one open port. Empty strings mean "unknown". */
 typedef struct {
     char service[DETECTED_SERVICE_SIZE]; /* protocol actually spoken: "ssh", "http", "tls", ... */
     char product[DETECTED_PRODUCT_SIZE]; /* software: "OpenSSH", "nginx", "MariaDB", ... */
     char version[DETECTED_VERSION_SIZE]; /* "9.6p1", "1.24.0", ... */
     char info[DETECTED_INFO_SIZE];       /* extra detail: "Ubuntu", "TLS 1.3, TLS_AES_256_GCM_SHA384", ... */
-    tls_certificate certificate;         /* TLS only; .present is false otherwise */
+    starttls_state starttls_status;
+    char starttls[DETECTED_INFO_SIZE];   /* "TLS 1.3, TLS_AES_256_GCM_SHA384" after a STARTTLS upgrade */
+    tls_certificate certificate;         /* TLS and STARTTLS only; .present is false otherwise */
 } service_info;
 
 /* What Janus sent before the reply arrived. The same bytes can mean different things. */
@@ -98,6 +107,20 @@ bool parse_certificate(const unsigned char *der, size_t length, tls_certificate 
 /* Validity at time now ("YYYY-MM-DDTHH:MM:SSZ", e.g. the scan's start time). */
 bool certificate_expired(const tls_certificate *certificate, const char *now);
 bool certificate_not_yet_valid(const tls_certificate *certificate, const char *now);
+
+/*
+ * Text protocols answer in lines. These say when a reply is complete:
+ *
+ * line_reply_complete: SMTP/FTP replies may span lines "250-..." and end with
+ *   a line "250 ..." (code, space). Other text ends with the first line.
+ * tagged_reply_complete: IMAP ends a command's reply with a line that starts
+ *   with the command's tag, e.g. "J1 OK Begin TLS negotiation".
+ */
+bool line_reply_complete(const unsigned char *data, size_t length);
+bool tagged_reply_complete(const unsigned char *data, size_t length, const char *tag);
+
+/* True if an EHLO reply lists the STARTTLS extension. */
+bool smtp_offers_starttls(const unsigned char *data, size_t length);
 
 /* The 8-byte PostgreSQL SSLRequest message. Returns its length (0 if buffer is too small). */
 size_t pgsql_ssl_request(unsigned char *buffer, size_t buffer_size);

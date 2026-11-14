@@ -520,6 +520,33 @@ static void test_certificates(void)
           "tls probe: TLS 1.2-only hello offers no 1.3 version or suites");
 }
 
+static void test_starttls_replies(void)
+{
+    CHECK(line_reply_complete((const unsigned char *)"220 ready\r\n", 11), "lines: single coded line is complete");
+    CHECK(!line_reply_complete((const unsigned char *)"220 rea", 7), "lines: unfinished line is not");
+    CHECK(!line_reply_complete((const unsigned char *)"250-mail\r\n250-STARTTLS\r\n", 24),
+          "lines: SMTP continuation lines wait for the final line");
+    CHECK(line_reply_complete((const unsigned char *)"250-mail\r\n250 8BITMIME\r\n", 24),
+          "lines: SMTP reply ends with 'code space'");
+    CHECK(line_reply_complete((const unsigned char *)"+OK hi\r\n", 8), "lines: uncoded text ends with the first line");
+    static const char imap[] = "* NOTE x\r\nJ1 OK go\r\n";
+    CHECK(!tagged_reply_complete((const unsigned char *)imap, 10, "J1") &&
+              tagged_reply_complete((const unsigned char *)imap, sizeof imap - 1, "J1"),
+          "imap: the tagged line ends the reply");
+    CHECK(!tagged_reply_complete((const unsigned char *)"J10 OK\r\n", 8, "J1"), "imap: a longer tag does not match");
+    static const char ehlo[] = "250-mail.test\r\n250-PIPELINING\r\n250-starttls\r\n250 8BITMIME\r\n";
+    CHECK(smtp_offers_starttls((const unsigned char *)ehlo, sizeof ehlo - 1), "smtp: STARTTLS found in EHLO reply");
+    static const char no_tls[] = "250-mail.test\r\n250-XSTARTTLSX\r\n250 8BITMIME\r\n";
+    CHECK(!smtp_offers_starttls((const unsigned char *)no_tls, sizeof no_tls - 1),
+          "smtp: only an exact STARTTLS line counts");
+    static const char last[] = "250 STARTTLS";
+    CHECK(smtp_offers_starttls((const unsigned char *)last, sizeof last - 1), "smtp: STARTTLS on the final line");
+    service_info info;
+    CHECK(tcp(PROBE_GREETING, TEXT("220-Welcome to our server\r\n220 (vsFTPd 3.0.5)\r\n"), &info) &&
+              is(&info, "ftp", "vsftpd", "3.0.5", ""),
+          "ftp: product on the second line of a multi-line greeting");
+}
+
 static void test_format(void)
 {
     char out[160];
@@ -544,6 +571,7 @@ int main(void)
     test_tls();
     test_tls_probe();
     test_certificates();
+    test_starttls_replies();
     test_databases();
     test_text_greetings();
     test_udp_replies();

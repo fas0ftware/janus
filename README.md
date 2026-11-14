@@ -1,7 +1,7 @@
 # Janus
 
 [![CI](https://github.com/fas0ftware/janus/actions/workflows/ci.yml/badge.svg)](https://github.com/fas0ftware/janus/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.7.0-blue)
+![Version](https://img.shields.io/badge/version-1.8.0-blue)
 ![C11](https://img.shields.io/badge/C11-POSIX%20%2B%20pthreads-555)
 ![Checks](https://img.shields.io/badge/ASan%20%C2%B7%20UBSan%20%C2%B7%20TSan%20%C2%B7%20valgrind-clean-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -54,6 +54,10 @@ Named after Janus, the Roman god of gates and doorways. Ports are doors.
   signed it (or that it is self-signed), until when it is valid (**EXPIRED**
   is flagged), its key (`RSA 2048`, `EC P-256`) and its subjectAltName list.
   Host names are sent as SNI, so virtual hosts show the right certificate
+- **STARTTLS check** (with `--sv`): SMTP, IMAP, POP3, FTP and PostgreSQL are
+  asked to switch to TLS (`STARTTLS`, `STLS`, `AUTH TLS`, `SSLRequest`), so a
+  mail server's TLS version and certificate show up too, and a server that
+  does **not** offer TLS is flagged: its passwords travel in clear text
 - Service names from `/etc/services` (`22` → `ssh`) when `--sv` is not used
 - Human-readable table or **JSON** output for other programs
 - Clean `Ctrl+C`: stops within ~0.1 s and prints partial results
@@ -93,7 +97,9 @@ Usage: janus -t <target> [options]
                         product and version (OpenSSH 9.6p1, nginx 1.24.0,
                         TLS 1.3, MySQL, ...). Silent ports get a TLS and an
                         HTTP probe. TLS ports show their certificate (name,
-                        issuer, expiry, key). With --udp, replies are decoded
+                        issuer, expiry, key); SMTP, IMAP, POP3, FTP and
+                        PostgreSQL are asked for STARTTLS. With --udp,
+                        replies are decoded
       --open            with several hosts, list only hosts with open ports
       --discover        first find which hosts answer (TCP probes, no root
                         needed) and port-scan only those; down hosts are skipped
@@ -205,6 +211,21 @@ get `detected.certificate`:
 `expired` is judged against the scan's own `timestamp`. The certificate is
 `null` when the server only speaks TLS 1.3, which encrypts it.
 
+Mail, FTP and PostgreSQL servers start in plain text and switch to TLS on
+request. Janus asks, and reports the answer:
+
+```text
+25/tcp     open     smtp             Postfix
+           starttls: TLS 1.3, TLS_AES_256_GCM_SHA384
+           cert: mail.home.arpa, issuer R11, valid until 2027-01-31, EC P-256
+143/tcp    open     imap             Dovecot
+           starttls: NOT OFFERED (logins travel in clear text)
+```
+
+(Illustrative output.) In JSON, `detected.starttls` is
+`{"offered": true, "tls": "TLS 1.3, ..."}`, `{"offered": false}`, or `null`
+for protocols without an upgrade command.
+
 UDP scan of your own machine or router (silent ports show as `open|filtered`):
 
 ```console
@@ -232,7 +253,7 @@ gains `hosts_up` and `hosts_down`). Every document says `"protocol": "tcp"` or
 $ ./janus -t localhost -p 22,80,443,631,8000 --json
 {
   "scanner": "janus",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "timestamp": "2026-11-11T17:55:00Z",
   "target": "localhost",
   "ip": "127.0.0.1",
@@ -329,23 +350,24 @@ docs/
 
 ## Tests and checks
 
-`make test` runs 124 C unit checks (target lists, CIDR edge cases such as /31,
-/32 and oversized blocks, banner sanitizing, UDP probe payloads, and 86 for
+`make test` runs 135 C unit checks (target lists, CIDR edge cases such as /31,
+/32 and oversized blocks, banner sanitizing, UDP probe payloads, and 97 for
 `--sv`: every fingerprint parser with real, truncated and hostile replies,
 the TLS ClientHello layout and SNI, a real X.509 certificate cut at every
-length and corrupted 2345 ways) and 116 end-to-end checks against
+length and corrupted 2345 ways, STARTTLS reply framing) and 122 end-to-end checks against
 local listeners: open/closed/filtered, threads (also across hosts), Ctrl+C, write errors, JSON,
 banners (including a listener that sends terminal escape codes), top ports,
 lists, CIDR, `--open`, unresolvable hosts in a list, IPv6 and `-4`/`-6`,
 host discovery (up, down, JSON status, Ctrl+C while probing), UDP (open,
 closed, open|filtered, JSON, Ctrl+C) and `--sv` (SSH, HTTP on an odd port, a
 real TLS server with a certificate per SNI name, a TLS 1.3-only server,
-Redis, MariaDB, a silent service, JSON, Ctrl+C).
+SMTP/IMAP/POP3/FTP servers that switch to TLS and one that cannot, Redis,
+MariaDB, a silent service, JSON, Ctrl+C).
 
 ![make test](docs/test-results.svg)
 
 (The machine in this picture had no IPv6, so its 4 IPv6 checks were skipped:
-112 of the 116. CI runs all of them.)
+118 of the 122. CI runs all of them.)
 
 `make check` repeats the suite under AddressSanitizer + UBSan, runs valgrind
 with leak checking (including a CIDR + IPv6 + banner scan) and
@@ -396,6 +418,15 @@ it, plus cppcheck.
 - Integration as the scanning engine of `network-monitor` (via `--json`)
 
 ## Changelog
+
+- **1.8.0** – STARTTLS in `--sv`: SMTP (`EHLO`, `STARTTLS`), IMAP
+  (`STARTTLS`), POP3 (`STLS`), FTP (`AUTH TLS`) and PostgreSQL (`SSLRequest`)
+  are upgraded on a fresh connection; the TLS version, cipher and certificate
+  appear under the port, or `NOT OFFERED` when the server keeps logins in clear
+  text. Multi-line `220-` greetings are read to the end (vsftpd behind a
+  welcome text is now recognized). JSON: `detected.starttls`, and
+  `detected.certificate` is now present for every identified port (`null`
+  when there is none). 11 unit and 6 end-to-end checks.
 
 - **1.7.0** – TLS certificates in `--sv`: subject, issuer or self-signed,
   validity with **EXPIRED** / **NOT YET VALID**, key type and size, and

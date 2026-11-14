@@ -234,6 +234,28 @@ produce is printable ASCII, the same rule as for banners. The unit tests feed
 them truncated packets, lying length fields and terminal escape codes under
 AddressSanitizer.
 
+### STARTTLS
+
+Mail and file transfer protocols are older than TLS, so they start in plain
+text and switch on request. After identifying such a service Janus opens one
+more connection and asks:
+
+| Service    | Conversation                                             |
+|------------|----------------------------------------------------------|
+| SMTP       | greeting, `EHLO janus.invalid`, reply must list `STARTTLS`, `STARTTLS` → `220` |
+| IMAP       | greeting, `J1 STARTTLS` → `J1 OK` (untagged lines may come first) |
+| POP3       | greeting, `STLS` → `+OK`                                 |
+| FTP        | greeting, `AUTH TLS` → `234`                             |
+| PostgreSQL | `SSLRequest` → `S` (the first probe already got `S` or `N`) |
+
+Then it sends the same ClientHello as for a TLS port, and reads the TLS
+version and certificate the same way (with the TLS 1.2 follow-up for 1.3
+servers). A refusal is a finding of its own: the server makes clients log in
+over plain text. The `EHLO` name uses the reserved `.invalid` domain, so it
+reveals nothing about the scanning machine. SMTP and FTP replies may span
+several lines (`250-...`, then `250 ...`): Janus reads until the line where a
+space follows the code.
+
 ### UDP
 
 UDP replies are already in hand after the scan, so `--sv --udp` costs nothing
@@ -246,7 +268,8 @@ software in the `SERVER` header) and mDNS (the advertised service types such as
 
 A service that greets costs nothing extra. A silent one costs up to three
 waits of `--timeout` (at most 1.5 s each) and two more connections; a TLS 1.3
-server one more connection for its certificate. Every
+server one more connection for its certificate, a mail or FTP server one or
+two more for STARTTLS. Every
 probe is a fixed, harmless message: no logins, no guessed passwords, nothing
 that changes state on the server. The extra connections do show up in the
 service's logs.

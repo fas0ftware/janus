@@ -1072,18 +1072,20 @@ static void find_greeting_product(const unsigned char *line, size_t length, serv
     }
 }
 
-/* FTP and SMTP both greet with "220"; POP3 with "+OK"; IMAP with "* OK". */
+/*
+ * FTP and SMTP both greet with "220"; POP3 with "+OK"; IMAP with "* OK". A
+ * greeting may span lines ("220-Welcome" ... "220 vsFTPd 3.0.5"), so the
+ * markers are looked for in the whole reply, not only the first line.
+ */
 static bool identify_mail_or_ftp(const unsigned char *data, size_t length, service_info *out)
 {
     size_t line = line_length(data, length);
     const char *service = NULL;
     if (has_prefix(data, line, "220")) {
-        if (find_text(data, line, "FTP", true) != NULL) {
+        if (find_text(data, length, "FTP", true) != NULL || find_text(data, length, "FileZilla", false) != NULL) {
             service = "ftp";
-        } else if (find_text(data, line, "SMTP", true) != NULL) {
+        } else if (find_text(data, length, "SMTP", true) != NULL) {
             service = "smtp";
-        } else if (find_text(data, line, "FileZilla", false) != NULL) {
-            service = "ftp";
         }
     } else if (has_prefix(data, line, "+OK")) {
         service = "pop3";
@@ -1094,7 +1096,16 @@ static bool identify_mail_or_ftp(const unsigned char *data, size_t length, servi
         return false;
     }
     set_text(out->service, sizeof out->service, service);
-    find_greeting_product(data, line, out);
+    /* Search line by line, so a version is never read across a line break. */
+    size_t start = 0;
+    while (start < length && out->product[0] == '\0') {
+        size_t end = start + line_length(data + start, length - start);
+        find_greeting_product(data + start, end - start, out);
+        start = end;
+        while (start < length && (data[start] == '\r' || data[start] == '\n')) {
+            start++;
+        }
+    }
     return true;
 }
 
@@ -1456,6 +1467,70 @@ bool identify_udp_reply(uint16_t port, const unsigned char *data, size_t length,
         memset(out, 0, sizeof *out);
     }
     return found;
+}
+
+/* ---- STARTTLS conversations --------------------------------------------------- */
+
+/* Does the line at data[start..end) begin with three digits followed by ' ' (or end there)? */
+static bool is_final_code_line(const unsigned char *line, size_t length)
+{
+    return length >= 3 && is_digit(line[0]) && is_digit(line[1]) && is_digit(line[2]) &&
+           (length == 3 || line[3] == ' ' || line[3] == '\r');
+}
+
+bool line_reply_complete(const unsigned char *data, size_t length)
+{
+    bool coded = length >= 4 && is_digit(data[0]) && is_digit(data[1]) && is_digit(data[2]) && data[3] == '-';
+    size_t start = 0;
+    for (size_t i = 0; i < length; i++) {
+        if (data[i] != '\n') {
+            continue;
+        }
+        /* A complete line ends here. */
+        if (!coded || is_final_code_line(data + start, i - start)) {
+            return true;
+        }
+        start = i + 1;
+    }
+    return false;
+}
+
+bool tagged_reply_complete(const unsigned char *data, size_t length, const char *tag)
+{
+    size_t tag_length = strlen(tag);
+    size_t start = 0;
+    for (size_t i = 0; i < length; i++) {
+        if (data[i] != '\n') {
+            continue;
+        }
+        if (i - start > tag_length && memcmp(data + start, tag, tag_length) == 0 && data[start + tag_length] == ' ') {
+            return true;
+        }
+        start = i + 1;
+    }
+    return false;
+}
+
+bool smtp_offers_starttls(const unsigned char *data, size_t length)
+{
+    size_t start = 0;
+    for (size_t i = 0; i <= length; i++) {
+        if (i < length && data[i] != '\n') {
+            continue;
+        }
+        const unsigned char *line = data + start;
+        size_t line_end = i - start;
+        while (line_end > 0 && is_space(line[line_end - 1])) {
+            line_end--;
+        }
+        /* "250-STARTTLS" or "250 STARTTLS" */
+        if (line_end == 12 && has_prefix(line, line_end, "250") && (line[3] == '-' || line[3] == ' ') &&
+            strncasecmp((const char *)line + 4, "STARTTLS", 8) == 0) {
+            return true;
+        }
+        start = i + 1;
+    }
+    return false;
 }
 
 /* ---- display ---------------------------------------------------------------------- */

@@ -107,6 +107,7 @@ memcheck: $(TARGET)
 	$(VALGRIND) ./$(TARGET) -t 127.0.0.1 --udp --banner 2> /dev/null; test $$? -eq 2
 	$(VALGRIND) ./$(TARGET) -t 127.0.0.0/30,::1 -p 22,80,443,631,8000 --sv --banner --timeout 300 --json > /dev/null
 	$(VALGRIND) ./$(TARGET) -t 127.0.0.1 --udp --sv --timeout 200 > /dev/null
+	$(VALGRIND) ./$(TARGET) -t localhost -p 21,25,110,143,465,587,993,995,5432 --sv --timeout 300 --json > /dev/null
 	@echo "valgrind: no leaks or memory errors"
 
 # ThreadSanitizer finds data races between threads. It cannot be combined

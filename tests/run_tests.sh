@@ -26,6 +26,7 @@ SV_REDIS_PORT=29841   # --sv: answers any request like Redis answers an unknown 
 SV_MYSQL_PORT=29842   # --sv: sends a MariaDB handshake greeting
 SV_SILENT_PORT=29843  # --sv: accepts, reads, never answers
 SV_TLS13_PORT=29844   # --sv: TLS server that accepts only TLS 1.3 (its certificate stays encrypted)
+STARTTLS_PORT=29850   # 29850-29854: SMTP, IMAP, POP3 and FTP with STARTTLS, SMTP without
 passed=0
 failed=0
 
@@ -110,13 +111,21 @@ if command -v openssl >/dev/null &&
     sv_tls_pid=$!
     python3 "$TESTS_DIR/service_listener.py" "$HOST" "$SV_TLS13_PORT" tls13 "$cert_dir/cert.pem" "$cert_dir/key.pem" &
     sv_tls13_pid=$!
+    offset=0
+    for proto in smtp imap pop3 ftp smtp-plain; do
+        python3 "$TESTS_DIR/service_listener.py" "$HOST" "$((STARTTLS_PORT + offset))" starttls "$proto" \
+            "$cert_dir/sni-cert.pem" "$cert_dir/sni-key.pem" &
+        sv_tls13_pid="$sv_tls13_pid $!"
+        offset=$((offset + 1))
+    done
 fi
 trap 'kill "$server_pid" "$filtered_pid" "$banner_pid" "$evil_pid" "$udp_reply_pid" "$udp_silent_pid" "$udp_payload_pid" "$udp_ssdp_pid" "$sv_redis_pid" "$sv_mysql_pid" "$sv_silent_pid" $sv_tls_pid $sv_tls13_pid $v6_pid 2>/dev/null; rm -f "$ready_file" "$udp_ready".*; rm -rf "$cert_dir"' EXIT
 
 wait_for_port "$OPEN_PORT" || { echo "listener on $OPEN_PORT did not start"; exit 1; }
 wait_for_port "$BANNER_PORT" || { echo "listener on $BANNER_PORT did not start"; exit 1; }
 wait_for_port "$EVIL_PORT" || { echo "listener on $EVIL_PORT did not start"; exit 1; }
-for sv_port in "$SV_REDIS_PORT" "$SV_MYSQL_PORT" "$SV_SILENT_PORT" ${sv_tls_pid:+"$SV_TLS_PORT" "$SV_TLS13_PORT"}; do
+for sv_port in "$SV_REDIS_PORT" "$SV_MYSQL_PORT" "$SV_SILENT_PORT" \
+    ${sv_tls_pid:+"$SV_TLS_PORT" "$SV_TLS13_PORT" "$STARTTLS_PORT" "$((STARTTLS_PORT + 4))"}; do
     wait_for_port "$sv_port" || { echo "listener on $sv_port did not start"; exit 1; }
 done
 for _ in $(seq 30); do [[ -f "$ready_file" ]] && break; sleep 0.1; done
@@ -530,6 +539,37 @@ assert only13["info"].startswith("TLS 1.3") and only13["certificate"] is None, o
         fail "--sv JSON: certificate details; null when TLS 1.3 keeps it encrypted"
         sed 's/^/    | /' <<<"$tls_json"
     fi
+    starttls_out="$("$BINARY" -t localhost -p "$STARTTLS_PORT-$((STARTTLS_PORT + 4))" --sv 2>&1)"
+    for entry in "0 smtp" "1 imap" "2 pop3" "3 ftp"; do
+        set -- $entry
+        port=$((STARTTLS_PORT + $1))
+        if grep -qE "^$port/tcp +open +$2 " <<<"$starttls_out" &&
+            grep -A2 -E "^$port/tcp" <<<"$starttls_out" | grep -qE "^ +starttls: TLS 1\.[23], " &&
+            grep -A3 -E "^$port/tcp" <<<"$starttls_out" | grep -qE "^ +cert: localhost, self-signed"; then
+            pass "--sv: $2 STARTTLS upgrade shows TLS version and certificate"
+        else
+            fail "--sv: $2 STARTTLS upgrade shows TLS version and certificate"
+            sed 's/^/    | /' <<<"$starttls_out"
+        fi
+    done
+    expect_output "--sv: a mail server without STARTTLS is flagged" \
+        "^ +starttls: NOT OFFERED \(logins travel in clear text\)$" "$BINARY" -t "$HOST" -p "$((STARTTLS_PORT + 4))" --sv
+    starttls_json="$("$BINARY" -t localhost -p "$STARTTLS_PORT,$((STARTTLS_PORT + 4)),$BANNER_PORT" --sv --json 2>/dev/null)"
+    if python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+ports = {p["port"]: p["detected"] for p in d["open_ports"]}
+smtp, plain, ssh = ports[int(sys.argv[2])], ports[int(sys.argv[2]) + 4], ports[int(sys.argv[3])]
+assert smtp["starttls"]["offered"] is True and smtp["starttls"]["tls"].startswith("TLS 1."), smtp
+assert smtp["certificate"]["subject"] == "localhost", smtp
+assert plain["starttls"] == {"offered": False} and plain["certificate"] is None, plain
+assert ssh["starttls"] is None and ssh["certificate"] is None, ssh
+' "$starttls_json" "$STARTTLS_PORT" "$BANNER_PORT"; then
+        pass "--sv JSON: starttls object (offered or not), null where it does not apply"
+    else
+        fail "--sv JSON: starttls object (offered or not), null where it does not apply"
+        sed 's/^/    | /' <<<"$starttls_json"
+    fi
 else
     echo "SKIP: TLS detection tests (no openssl command to make a certificate)"
 fi
@@ -561,7 +601,8 @@ import json, sys
 d = json.loads(sys.argv[1])
 ports = {p["port"]: p for p in d["open_ports"]}
 ssh, http, mysql, silent = (ports[int(x)] for x in sys.argv[2:6])
-assert ssh["detected"] == {"service": "ssh", "product": "JanusTest", "version": "1.0", "info": ""}, ssh
+expected = {"service": "ssh", "product": "JanusTest", "version": "1.0", "info": "", "starttls": None, "certificate": None}
+assert ssh["detected"] == expected, ssh
 assert http["detected"]["service"] == "http" and http["detected"]["product"] == "SimpleHTTP", http
 assert mysql["detected"]["product"] == "MariaDB" and mysql["detected"]["version"] == "10.11.6", mysql
 assert silent["detected"] is None, silent

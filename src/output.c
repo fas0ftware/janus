@@ -155,6 +155,11 @@ static void print_version_table(const scan_report *report, int state_width)
         }
         printf("%-10s %-*s %-16s %s\n", port_label, state_width, port_state_to_string(result->state),
                service_label(result, protocol, service_buffer, sizeof service_buffer), version[0] ? version : "-");
+        if (result->detected != NULL && result->detected->starttls_status == STARTTLS_OK) {
+            printf("%-10s starttls: %s\n", "", result->detected->starttls);
+        } else if (result->detected != NULL && result->detected->starttls_status == STARTTLS_NOT_OFFERED) {
+            printf("%-10s starttls: NOT OFFERED (logins travel in clear text)\n", "");
+        }
         if (result->detected != NULL && result->detected->certificate.present) {
             print_certificate_text(&result->detected->certificate, report->started_at);
         }
@@ -324,9 +329,17 @@ static void print_detected_json(const service_info *detected, const char *now)
     print_json_string(detected->version);
     printf(", \"info\": ");
     print_json_string(detected->info);
-    if (strcmp(detected->service, "tls") == 0) {
-        print_certificate_json(&detected->certificate, now);
+    printf(", \"starttls\": ");
+    if (detected->starttls_status == STARTTLS_NOT_APPLICABLE) {
+        printf("null");
+    } else if (detected->starttls_status == STARTTLS_NOT_OFFERED) {
+        printf("{\"offered\": false}");
+    } else {
+        printf("{\"offered\": true, \"tls\": ");
+        print_json_string(detected->starttls);
+        printf("}");
     }
+    print_certificate_json(&detected->certificate, now);
     printf("}");
 }
 
