@@ -105,7 +105,38 @@ static const char *service_label(const port_result *result, const char *protocol
     return result->detected->service;
 }
 
-/* PORT, STATE, SERVICE and VERSION; the banner goes on its own line below. */
+/*
+ * Two lines under a TLS port: who the certificate is for and until when, then
+ * the names it is valid for. Problems are written in capitals so they stand out.
+ */
+static void print_certificate_text(const tls_certificate *certificate, const char *now)
+{
+    printf("%-10s cert: %s", "", certificate->subject[0] ? certificate->subject : "(no name)");
+    if (certificate->self_signed) {
+        printf(", self-signed");
+    } else if (certificate->issuer[0] != '\0') {
+        printf(", issuer %s", certificate->issuer);
+    }
+    printf(", valid until %.10s", certificate->not_after);
+    if (certificate->key[0] != '\0') {
+        printf(", %s", certificate->key);
+    }
+    if (certificate_expired(certificate, now)) {
+        printf(", EXPIRED");
+    } else if (certificate_not_yet_valid(certificate, now)) {
+        printf(", NOT YET VALID");
+    }
+    printf("\n");
+    if (certificate->name_count > 0) {
+        printf("%-10s names: ", "");
+        for (size_t i = 0; i < certificate->name_count; i++) {
+            printf("%s%s", i ? ", " : "", certificate->names[i]);
+        }
+        printf("\n");
+    }
+}
+
+/* PORT, STATE, SERVICE and VERSION; certificate and banner go on their own lines below. */
 static void print_version_table(const scan_report *report, int state_width)
 {
     const char *protocol = protocol_name(report);
@@ -124,6 +155,9 @@ static void print_version_table(const scan_report *report, int state_width)
         }
         printf("%-10s %-*s %-16s %s\n", port_label, state_width, port_state_to_string(result->state),
                service_label(result, protocol, service_buffer, sizeof service_buffer), version[0] ? version : "-");
+        if (result->detected != NULL && result->detected->certificate.present) {
+            print_certificate_text(&result->detected->certificate, report->started_at);
+        }
         if (report->show_banner && result->banner[0] != '\0') {
             printf("%-10s banner: %s\n", "", result->banner);
         }
@@ -248,7 +282,34 @@ static void print_json_string(const char *text)
 }
 
 /* --sv result of one port: an object with four strings ("" = unknown), or null if nothing was recognized. */
-static void print_detected_json(const service_info *detected)
+static void print_certificate_json(const tls_certificate *certificate, const char *now)
+{
+    printf(", \"certificate\": ");
+    if (!certificate->present) {
+        printf("null");
+        return;
+    }
+    printf("{\"subject\": ");
+    print_json_string(certificate->subject);
+    printf(", \"issuer\": ");
+    print_json_string(certificate->issuer);
+    printf(", \"self_signed\": %s, \"not_before\": ", certificate->self_signed ? "true" : "false");
+    print_json_string(certificate->not_before);
+    printf(", \"not_after\": ");
+    print_json_string(certificate->not_after);
+    printf(", \"expired\": %s, \"not_yet_valid\": %s, \"key\": ",
+           certificate_expired(certificate, now) ? "true" : "false",
+           certificate_not_yet_valid(certificate, now) ? "true" : "false");
+    print_json_string(certificate->key);
+    printf(", \"names\": [");
+    for (size_t i = 0; i < certificate->name_count; i++) {
+        printf("%s", i ? ", " : "");
+        print_json_string(certificate->names[i]);
+    }
+    printf("]}");
+}
+
+static void print_detected_json(const service_info *detected, const char *now)
 {
     printf(", \"detected\": ");
     if (detected == NULL) {
@@ -263,6 +324,9 @@ static void print_detected_json(const service_info *detected)
     print_json_string(detected->version);
     printf(", \"info\": ");
     print_json_string(detected->info);
+    if (strcmp(detected->service, "tls") == 0) {
+        print_certificate_json(&detected->certificate, now);
+    }
     printf("}");
 }
 
@@ -286,7 +350,7 @@ static void print_port_array(const scan_report *report, const char *pad, const c
             print_json_string(result->banner);
         }
         if (wanted == PORT_OPEN && report->show_version) {
-            print_detected_json(result->detected);
+            print_detected_json(result->detected, report->started_at);
         }
         printf("}");
         first = false;

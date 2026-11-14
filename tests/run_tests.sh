@@ -25,6 +25,7 @@ SV_TLS_PORT=29840     # --sv: a real TLS server (needs the openssl command for i
 SV_REDIS_PORT=29841   # --sv: answers any request like Redis answers an unknown command
 SV_MYSQL_PORT=29842   # --sv: sends a MariaDB handshake greeting
 SV_SILENT_PORT=29843  # --sv: accepts, reads, never answers
+SV_TLS13_PORT=29844   # --sv: TLS server that accepts only TLS 1.3 (its certificate stays encrypted)
 passed=0
 failed=0
 
@@ -96,18 +97,26 @@ python3 "$TESTS_DIR/service_listener.py" "$HOST" "$SV_SILENT_PORT" silent &
 sv_silent_pid=$!
 cert_dir="$(mktemp -d)"
 sv_tls_pid=""
+sv_tls13_pid=""
+# Two certificates: clients that send SNI "localhost" get the second one, everyone else the first.
 if command -v openssl >/dev/null &&
-    openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost \
-        -keyout "$cert_dir/key.pem" -out "$cert_dir/cert.pem" >/dev/null 2>&1; then
-    python3 "$TESTS_DIR/service_listener.py" "$HOST" "$SV_TLS_PORT" tls "$cert_dir/cert.pem" "$cert_dir/key.pem" &
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/O=Janus Tests/CN=janus-default" \
+        -keyout "$cert_dir/key.pem" -out "$cert_dir/cert.pem" >/dev/null 2>&1 &&
+    openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=localhost" \
+        -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+        -keyout "$cert_dir/sni-key.pem" -out "$cert_dir/sni-cert.pem" >/dev/null 2>&1; then
+    python3 "$TESTS_DIR/service_listener.py" "$HOST" "$SV_TLS_PORT" tls "$cert_dir/cert.pem" "$cert_dir/key.pem" \
+        localhost "$cert_dir/sni-cert.pem" "$cert_dir/sni-key.pem" &
     sv_tls_pid=$!
+    python3 "$TESTS_DIR/service_listener.py" "$HOST" "$SV_TLS13_PORT" tls13 "$cert_dir/cert.pem" "$cert_dir/key.pem" &
+    sv_tls13_pid=$!
 fi
-trap 'kill "$server_pid" "$filtered_pid" "$banner_pid" "$evil_pid" "$udp_reply_pid" "$udp_silent_pid" "$udp_payload_pid" "$udp_ssdp_pid" "$sv_redis_pid" "$sv_mysql_pid" "$sv_silent_pid" $sv_tls_pid $v6_pid 2>/dev/null; rm -f "$ready_file" "$udp_ready".*; rm -rf "$cert_dir"' EXIT
+trap 'kill "$server_pid" "$filtered_pid" "$banner_pid" "$evil_pid" "$udp_reply_pid" "$udp_silent_pid" "$udp_payload_pid" "$udp_ssdp_pid" "$sv_redis_pid" "$sv_mysql_pid" "$sv_silent_pid" $sv_tls_pid $sv_tls13_pid $v6_pid 2>/dev/null; rm -f "$ready_file" "$udp_ready".*; rm -rf "$cert_dir"' EXIT
 
 wait_for_port "$OPEN_PORT" || { echo "listener on $OPEN_PORT did not start"; exit 1; }
 wait_for_port "$BANNER_PORT" || { echo "listener on $BANNER_PORT did not start"; exit 1; }
 wait_for_port "$EVIL_PORT" || { echo "listener on $EVIL_PORT did not start"; exit 1; }
-for sv_port in "$SV_REDIS_PORT" "$SV_MYSQL_PORT" "$SV_SILENT_PORT" ${sv_tls_pid:+"$SV_TLS_PORT"}; do
+for sv_port in "$SV_REDIS_PORT" "$SV_MYSQL_PORT" "$SV_SILENT_PORT" ${sv_tls_pid:+"$SV_TLS_PORT" "$SV_TLS13_PORT"}; do
     wait_for_port "$sv_port" || { echo "listener on $sv_port did not start"; exit 1; }
 done
 for _ in $(seq 30); do [[ -f "$ready_file" ]] && break; sleep 0.1; done
@@ -496,8 +505,33 @@ expect_output "--sv: HTTP on an unusual port is found and named" "^$OPEN_PORT/tc
 if [[ -n "$sv_tls_pid" ]]; then
     expect_output "--sv: TLS server shows protocol version and cipher" "^$SV_TLS_PORT/tcp +open +tls +TLS 1\.[23], [A-Z]" \
         "$BINARY" -t "$HOST" -p "$SV_TLS_PORT" --sv
+    expect_output "--sv: certificate of a TLS 1.3 server is read through a TLS 1.2 probe" \
+        "^ +cert: janus-default, self-signed, valid until 20[0-9-]{8}, RSA 2048$" \
+        "$BINARY" -t "$HOST" -p "$SV_TLS_PORT" --sv
+    expect_output "--sv: a host name is sent as SNI and picks the server's matching certificate" \
+        "^ +cert: localhost, self-signed, valid until 20[0-9-]{8}, RSA 2048$" \
+        "$BINARY" -t localhost -p "$SV_TLS_PORT" --sv
+    expect_output "--sv: subjectAltName entries are listed" "^ +names: localhost, 127\.0\.0\.1$" \
+        "$BINARY" -t localhost -p "$SV_TLS_PORT" --sv
+    tls_json="$("$BINARY" -t localhost -p "$SV_TLS_PORT,$SV_TLS13_PORT" --sv --json 2>/dev/null)"
+    if python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+ports = {p["port"]: p["detected"] for p in d["open_ports"]}
+c = ports[int(sys.argv[2])]["certificate"]
+assert c["subject"] == "localhost" and c["self_signed"] is True and c["key"] == "RSA 2048", c
+assert c["names"] == ["localhost", "127.0.0.1"] and c["expired"] is False and c["not_yet_valid"] is False, c
+assert c["not_before"] < d["timestamp"] < c["not_after"] and c["not_after"].endswith("Z"), (c, d["timestamp"])
+only13 = ports[int(sys.argv[3])]
+assert only13["info"].startswith("TLS 1.3") and only13["certificate"] is None, only13
+' "$tls_json" "$SV_TLS_PORT" "$SV_TLS13_PORT"; then
+        pass "--sv JSON: certificate details; null when TLS 1.3 keeps it encrypted"
+    else
+        fail "--sv JSON: certificate details; null when TLS 1.3 keeps it encrypted"
+        sed 's/^/    | /' <<<"$tls_json"
+    fi
 else
-    echo "SKIP: TLS detection test (no openssl command to make a certificate)"
+    echo "SKIP: TLS detection tests (no openssl command to make a certificate)"
 fi
 expect_output "--sv: Redis is recognized by its reply to HEAD" "^$SV_REDIS_PORT/tcp +open +redis +Redis$" \
     "$BINARY" -t "$HOST" -p "$SV_REDIS_PORT" --sv

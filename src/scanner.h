@@ -61,6 +61,7 @@ typedef struct {
     socklen_t address_length;
     int family; /* AF_INET or AF_INET6 */
     char ip_text[INET6_ADDRSTRLEN];
+    char host_name[256]; /* the name as given, "" for IP literals: sent as TLS SNI by --sv */
 } scan_target;
 
 /* How to scan: shared by all worker threads, never changed during a scan. */

@@ -1,6 +1,6 @@
 #include "scanner.h"
 
-#include <arpa/inet.h>  /* inet_ntop, htons */
+#include <arpa/inet.h>  /* inet_ntop, inet_pton, htons */
 #include <errno.h>      /* errno, EINPROGRESS, ECONNREFUSED, ... */
 #include <fcntl.h>      /* fcntl, O_NONBLOCK */
 #include <netdb.h>      /* getaddrinfo, freeaddrinfo, gai_strerror */
@@ -78,6 +78,13 @@ int resolve_target(const char *host, address_family family, scan_target *target)
     target->address_length = chosen->ai_addrlen;
     target->family = chosen->ai_family;
     freeaddrinfo(results);
+
+    /* Keep a host name (not an address literal) for TLS SNI. */
+    unsigned char literal[sizeof(struct in6_addr)];
+    if (inet_pton(AF_INET, host, literal) != 1 && inet_pton(AF_INET6, host, literal) != 1 &&
+        strlen(host) < sizeof target->host_name) {
+        memcpy(target->host_name, host, strlen(host) + 1);
+    }
 
     /* Binary address -> "127.0.0.1" or "::1" for display. */
     const void *raw = target->family == AF_INET

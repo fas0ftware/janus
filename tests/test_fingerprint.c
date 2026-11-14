@@ -189,7 +189,7 @@ static void test_tls(void)
 static void test_tls_probe(void)
 {
     unsigned char hello[512];
-    size_t length = tls_client_hello(hello, sizeof hello);
+    size_t length = tls_client_hello(hello, sizeof hello, NULL, false);
     size_t record = (size_t)hello[3] << 8 | hello[4];
     size_t handshake = (size_t)hello[6] << 16 | (size_t)hello[7] << 8 | hello[8];
     CHECK(length > 100 && hello[0] == 0x16 && hello[5] == 0x01 && record == length - 5 && handshake == length - 9,
@@ -200,7 +200,7 @@ static void test_tls_probe(void)
     offset += 1 + hello[offset];                                   /* compression */
     size_t extensions = (size_t)hello[offset] << 8 | hello[offset + 1];
     CHECK(offset + 2 + extensions == length, "tls probe: extension block ends at the end of the message");
-    CHECK(tls_client_hello(hello, 50) == 0, "tls probe: refuses a small buffer");
+    CHECK(tls_client_hello(hello, 50, NULL, false) == 0, "tls probe: refuses a small buffer");
     unsigned char pg[8];
     static const unsigned char expected[8] = {0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f};
     CHECK(pgsql_ssl_request(pg, sizeof pg) == 8 && memcmp(pg, expected, 8) == 0 && pgsql_ssl_request(pg, 7) == 0,
@@ -352,16 +352,184 @@ static void test_udp_replies(void)
     CHECK(!udp(9999, dns, sizeof dns, &info) && is_empty(&info), "udp: unprobed ports are never decoded");
 }
 
+/*
+ * A real certificate, made with:
+ *   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -days 3650 \
+ *     -subj "/O=Janus Test/CN=printer.lan" \
+ *     -addext "subjectAltName=DNS:printer.lan,DNS:printer,IP:192.168.1.20"
+ */
+static const unsigned char test_certificate[] = {
+    0x30, 0x82, 0x01, 0xd1, 0x30, 0x82, 0x01, 0x78, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x14, 0x37,
+    0x4d, 0x3a, 0xb4, 0x50, 0x02, 0xd9, 0xad, 0x2c, 0x50, 0xc3, 0x1a, 0x89, 0x23, 0xe7, 0x67, 0xe5,
+    0xfb, 0x2f, 0xdf, 0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02, 0x30,
+    0x2b, 0x31, 0x13, 0x30, 0x11, 0x06, 0x03, 0x55, 0x04, 0x0a, 0x0c, 0x0a, 0x4a, 0x61, 0x6e, 0x75,
+    0x73, 0x20, 0x54, 0x65, 0x73, 0x74, 0x31, 0x14, 0x30, 0x12, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c,
+    0x0b, 0x70, 0x72, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x2e, 0x6c, 0x61, 0x6e, 0x30, 0x1e, 0x17, 0x0d,
+    0x32, 0x36, 0x31, 0x31, 0x31, 0x34, 0x30, 0x37, 0x32, 0x35, 0x31, 0x32, 0x5a, 0x17, 0x0d, 0x33,
+    0x36, 0x31, 0x31, 0x31, 0x31, 0x30, 0x37, 0x32, 0x35, 0x31, 0x32, 0x5a, 0x30, 0x2b, 0x31, 0x13,
+    0x30, 0x11, 0x06, 0x03, 0x55, 0x04, 0x0a, 0x0c, 0x0a, 0x4a, 0x61, 0x6e, 0x75, 0x73, 0x20, 0x54,
+    0x65, 0x73, 0x74, 0x31, 0x14, 0x30, 0x12, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x0b, 0x70, 0x72,
+    0x69, 0x6e, 0x74, 0x65, 0x72, 0x2e, 0x6c, 0x61, 0x6e, 0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a,
+    0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
+    0x03, 0x42, 0x00, 0x04, 0xf2, 0xe9, 0xea, 0x88, 0xa5, 0xea, 0x47, 0xb5, 0xca, 0x6f, 0x28, 0x7e,
+    0x08, 0x8f, 0xf0, 0xb8, 0xcd, 0x20, 0x89, 0x9e, 0x74, 0x98, 0x8b, 0x54, 0xc9, 0x6b, 0xc6, 0x0f,
+    0xcb, 0x82, 0xd6, 0x18, 0x8e, 0xfb, 0x2f, 0x7a, 0xe4, 0x7a, 0x18, 0x08, 0x6b, 0x5a, 0x0e, 0x3e,
+    0xa2, 0x46, 0x17, 0xbf, 0x38, 0x72, 0x09, 0xca, 0xf3, 0x21, 0x61, 0x27, 0x05, 0xfa, 0xf0, 0x77,
+    0xa4, 0x5e, 0x05, 0xbd, 0xa3, 0x7a, 0x30, 0x78, 0x30, 0x1d, 0x06, 0x03, 0x55, 0x1d, 0x0e, 0x04,
+    0x16, 0x04, 0x14, 0x93, 0x03, 0x50, 0xd2, 0x5b, 0x0a, 0x38, 0x31, 0x74, 0x55, 0xdf, 0x2c, 0x01,
+    0xdb, 0x31, 0x4d, 0x4e, 0x8a, 0x1b, 0x12, 0x30, 0x1f, 0x06, 0x03, 0x55, 0x1d, 0x23, 0x04, 0x18,
+    0x30, 0x16, 0x80, 0x14, 0x93, 0x03, 0x50, 0xd2, 0x5b, 0x0a, 0x38, 0x31, 0x74, 0x55, 0xdf, 0x2c,
+    0x01, 0xdb, 0x31, 0x4d, 0x4e, 0x8a, 0x1b, 0x12, 0x30, 0x0f, 0x06, 0x03, 0x55, 0x1d, 0x13, 0x01,
+    0x01, 0xff, 0x04, 0x05, 0x30, 0x03, 0x01, 0x01, 0xff, 0x30, 0x25, 0x06, 0x03, 0x55, 0x1d, 0x11,
+    0x04, 0x1e, 0x30, 0x1c, 0x82, 0x0b, 0x70, 0x72, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x2e, 0x6c, 0x61,
+    0x6e, 0x82, 0x07, 0x70, 0x72, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x87, 0x04, 0xc0, 0xa8, 0x01, 0x14,
+    0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02, 0x03, 0x47, 0x00, 0x30,
+    0x44, 0x02, 0x20, 0x5e, 0x93, 0x36, 0x9f, 0xec, 0xbb, 0x64, 0x7d, 0x03, 0xf2, 0x8f, 0x12, 0xc4,
+    0xd4, 0xbb, 0x4c, 0xa8, 0x4e, 0xe1, 0x62, 0x0f, 0x3c, 0x8e, 0x22, 0x02, 0x85, 0xa5, 0x23, 0x53,
+    0xee, 0x4c, 0x39, 0x02, 0x20, 0x3f, 0xa7, 0xf2, 0x16, 0xc8, 0xb8, 0xe5, 0xbc, 0x5f, 0x14, 0x22,
+    0x73, 0xd8, 0x53, 0xa6, 0x66, 0xde, 0x55, 0xac, 0xc5, 0x4c, 0x28, 0x7c, 0x40, 0x6d, 0x6d, 0xba,
+    0xcb, 0x2d, 0x21, 0x10, 0xc4
+
+};
+
+/* Find a byte sequence in a buffer; NULL if absent. */
+static const unsigned char *find_bytes(const unsigned char *data, size_t length, const void *needle, size_t n)
+{
+    for (size_t i = 0; i + n <= length; i++) {
+        if (memcmp(data + i, needle, n) == 0) {
+            return data + i;
+        }
+    }
+    return NULL;
+}
+
+static void test_certificates(void)
+{
+    tls_certificate cert;
+    bool ok = parse_certificate(test_certificate, sizeof test_certificate, &cert);
+    CHECK(ok && cert.present && strcmp(cert.subject, "printer.lan") == 0, "cert: subject common name");
+    CHECK(ok && cert.self_signed && strcmp(cert.issuer, "printer.lan") == 0, "cert: self-signed is detected");
+    CHECK(ok && strcmp(cert.not_before, "2026-11-14T07:25:12Z") == 0 && strcmp(cert.not_after, "2036-11-11T07:25:12Z") == 0,
+          "cert: validity dates in ISO 8601");
+    CHECK(ok && strcmp(cert.key, "EC P-256") == 0, "cert: key type and curve");
+    CHECK(ok && cert.name_count == 3 && strcmp(cert.names[0], "printer.lan") == 0 &&
+              strcmp(cert.names[1], "printer") == 0 && strcmp(cert.names[2], "192.168.1.20") == 0,
+          "cert: subjectAltName DNS names and IP address");
+    CHECK(!certificate_expired(&cert, "2030-01-01T00:00:00Z") && certificate_expired(&cert, "2036-11-11T07:25:13Z"),
+          "cert: expired one second after notAfter");
+    CHECK(certificate_not_yet_valid(&cert, "2026-11-14T07:25:11Z") &&
+              !certificate_not_yet_valid(&cert, "2026-11-14T07:25:12Z"),
+          "cert: not yet valid before notBefore");
+    CHECK(!certificate_expired(&cert, ""), "cert: unknown current time never counts as expired");
+
+    /* Every truncation must be rejected cleanly (ASan checks that nothing is read past the end). */
+    bool all_rejected = true;
+    for (size_t n = 0; n < sizeof test_certificate; n++) {
+        unsigned char *copy = malloc(n ? n : 1);
+        memcpy(copy, test_certificate, n);
+        all_rejected &= !parse_certificate(copy, n, &cert) && !cert.present;
+        free(copy);
+    }
+    CHECK(all_rejected, "cert: every truncated prefix is rejected");
+
+    /* Flip every byte to a few hostile values: parsing may fail, but must stay in bounds and terminate. */
+    unsigned char *mutated = malloc(sizeof test_certificate);
+    static const unsigned char values[] = {0x00, 0x7f, 0x80, 0x83, 0xff};
+    bool printable = true;
+    size_t parsed = 0;
+    for (size_t i = 0; i < sizeof test_certificate; i++) {
+        for (size_t v = 0; v < sizeof values; v++) {
+            memcpy(mutated, test_certificate, sizeof test_certificate);
+            mutated[i] = values[v];
+            if (parse_certificate(mutated, sizeof test_certificate, &cert)) {
+                parsed++;
+                const char *texts[] = {cert.subject, cert.issuer, cert.key, cert.names[0]};
+                for (size_t t = 0; t < 4; t++) {
+                    for (const char *c = texts[t]; *c; c++) {
+                        printable &= *c >= 0x20 && *c < 0x7f;
+                    }
+                }
+            }
+        }
+    }
+    free(mutated);
+    CHECK(parsed > 0 && printable, "cert: 2345 corrupted certificates parse in bounds, text stays printable");
+
+    /* A TLS 1.2 flight: ServerHello in one record, the Certificate message split over two records. */
+    unsigned char flight[2048];
+    unsigned char hello[128];
+    size_t hello_length = server_hello(hello, 0x0303, 0xc02b, NULL, 0);
+    size_t f = 0;
+    memcpy(flight, hello, hello_length);
+    f = hello_length;
+    unsigned char message[1024];
+    size_t m = 0;
+    size_t list = 3 + sizeof test_certificate;
+    message[m++] = 11;
+    message[m++] = 0;
+    message[m++] = (unsigned char)((list + 3) >> 8);
+    message[m++] = (unsigned char)(list + 3);
+    message[m++] = 0;
+    message[m++] = (unsigned char)(list >> 8);
+    message[m++] = (unsigned char)list;
+    message[m++] = 0;
+    message[m++] = (unsigned char)(sizeof test_certificate >> 8);
+    message[m++] = (unsigned char)sizeof test_certificate;
+    memcpy(message + m, test_certificate, sizeof test_certificate);
+    m += sizeof test_certificate;
+    size_t half = m / 2;
+    const size_t pieces[2][2] = {{0, half}, {half, m - half}};
+    for (int i = 0; i < 2; i++) {
+        flight[f++] = 0x16;
+        flight[f++] = 0x03;
+        flight[f++] = 0x03;
+        flight[f++] = (unsigned char)(pieces[i][1] >> 8);
+        flight[f++] = (unsigned char)pieces[i][1];
+        memcpy(flight + f, message + pieces[i][0], pieces[i][1]);
+        f += pieces[i][1];
+    }
+    service_info info;
+    CHECK(tcp(PROBE_TLS, flight, f, &info) && info.certificate.present &&
+              strcmp(info.certificate.subject, "printer.lan") == 0 &&
+              strcmp(info.info, "TLS 1.2, ECDHE-ECDSA-AES128-GCM-SHA256") == 0,
+          "tls: certificate reassembled from two records");
+    CHECK(tls_reply_complete(flight, f), "tls: reply with the whole certificate is complete");
+    CHECK(!tls_reply_complete(flight, f - 1), "tls: one byte short of the certificate: keep reading");
+    CHECK(!tls_reply_complete(flight, hello_length), "tls: TLS 1.2 ServerHello alone: wait for the certificate");
+    CHECK(tcp(PROBE_TLS, flight, f - 40, &info) && strcmp(info.service, "tls") == 0 && !info.certificate.present,
+          "tls: truncated certificate is not reported");
+    static const unsigned char tls13[] = {0x00, 0x2b, 0x00, 0x02, 0x03, 0x04};
+    hello_length = server_hello(hello, 0x0303, 0x1301, tls13, sizeof tls13);
+    CHECK(tls_reply_complete(hello, hello_length) && !tls_reply_complete(hello, hello_length - 1),
+          "tls: TLS 1.3 is complete after the ServerHello");
+    static const unsigned char alert[] = {0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x46};
+    CHECK(tls_reply_complete(alert, sizeof alert), "tls: an alert is complete");
+
+    unsigned char probe[512];
+    size_t length = tls_client_hello(probe, sizeof probe, "printer.lan", false);
+    CHECK(length > 0 && find_bytes(probe, length, "\x00\x00\x00\x10\x00\x0e\x00\x00\x0bprinter.lan", 16) != NULL,
+          "tls probe: host name is sent as SNI");
+    length = tls_client_hello(probe, sizeof probe, "192.168.1.20", false);
+    CHECK(length > 0 && find_bytes(probe, length, "192.168", 7) == NULL, "tls probe: IP addresses are never sent as SNI");
+    length = tls_client_hello(probe, sizeof probe, "evil\r\nname", false);
+    CHECK(length > 0 && find_bytes(probe, length, "evil", 4) == NULL, "tls probe: invalid names are not sent");
+    length = tls_client_hello(probe, sizeof probe, NULL, true);
+    size_t record = (size_t)probe[3] << 8 | probe[4];
+    CHECK(length > 0 && record == length - 5 && find_bytes(probe, length, "\x00\x2b\x00", 3) == NULL &&
+              find_bytes(probe, length, "\x13\x01", 2) == NULL,
+          "tls probe: TLS 1.2-only hello offers no 1.3 version or suites");
+}
+
 static void test_format(void)
 {
     char out[160];
-    service_info info = {"ssh", "OpenSSH", "9.6p1", "Ubuntu"};
+    service_info info = {.service = "ssh", .product = "OpenSSH", .version = "9.6p1", .info = "Ubuntu"};
     format_detected_version(&info, out, sizeof out);
     CHECK(strcmp(out, "OpenSSH 9.6p1 (Ubuntu)") == 0, "format: product, version and info");
-    service_info tls = {"tls", "", "", "TLS 1.3"};
+    service_info tls = {.service = "tls", .info = "TLS 1.3"};
     format_detected_version(&tls, out, sizeof out);
     CHECK(strcmp(out, "TLS 1.3") == 0, "format: info alone has no parentheses");
-    service_info bare = {"telnet", "", "", ""};
+    service_info bare = {.service = "telnet"};
     format_detected_version(&bare, out, sizeof out);
     CHECK(strcmp(out, "") == 0, "format: nothing beyond the service name");
     char small[8];
@@ -375,6 +543,7 @@ int main(void)
     test_http();
     test_tls();
     test_tls_probe();
+    test_certificates();
     test_databases();
     test_text_greetings();
     test_udp_replies();

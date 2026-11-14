@@ -186,6 +186,44 @@ ServerHello is in, the connection is closed. Janus has no TLS library and
 cannot look inside the encrypted stream, so `443` shows up as `tls/https`
 with `TLS 1.3, TLS_AES_256_GCM_SHA384`, not as the web server behind it.
 
+When the target was given by name, the ClientHello carries it as **SNI**
+(server name indication). A server that hosts several sites picks its
+certificate by that name; without it, you would see the default site's.
+IP addresses are never sent as SNI (the standard forbids it).
+
+### The certificate
+
+In TLS 1.2 and older the server sends its certificate chain right after the
+ServerHello, **unencrypted**, before any key is agreed. The first certificate
+in the chain is the server's own. Janus keeps reading until it is complete;
+the server's first flight may split it over several TLS records, so the
+handshake messages are first reassembled into one stream.
+
+TLS 1.3 encrypts the certificate. For a 1.3 server Janus therefore opens one
+more connection with a ClientHello that offers only TLS 1.2. Most servers
+still accept 1.2 and send the certificate in clear text; a server that
+refuses everything below 1.3 answers with an alert, and the certificate is
+reported as unknown rather than guessed.
+
+The certificate itself is X.509 in DER: nested tag-length-value elements.
+`parse_certificate()` walks the structure with one rule: no length is
+followed unless it fits inside the element around it. It reads:
+
+```
+Certificate
+  tbsCertificate
+    [0] version, serialNumber, signature algorithm
+    issuer      -> common name (CN), else organization (O)
+    validity    -> notBefore, notAfter (UTCTime or GeneralizedTime)
+    subject     -> CN or O; identical issuer and subject = self-signed
+    subjectPublicKeyInfo -> RSA (modulus size), EC (curve), Ed25519
+    [3] extensions -> subjectAltName: DNS names and IP addresses
+```
+
+Times become ISO 8601 (`2027-01-31T12:00:00Z`), so "expired" is a plain
+string comparison with the scan's start time. Janus reports the certificate,
+it does not verify it: there is no signature or CA chain check.
+
 ### Untrusted bytes
 
 Every reply comes from a peer that might be hostile. The parsers in
@@ -207,7 +245,8 @@ software in the `SERVER` header) and mDNS (the advertised service types such as
 ### Cost and footprint
 
 A service that greets costs nothing extra. A silent one costs up to three
-waits of `--timeout` (at most 1.5 s each) and two more connections. Every
+waits of `--timeout` (at most 1.5 s each) and two more connections; a TLS 1.3
+server one more connection for its certificate. Every
 probe is a fixed, harmless message: no logins, no guessed passwords, nothing
 that changes state on the server. The extra connections do show up in the
 service's logs.

@@ -2,15 +2,15 @@
 
 #include <stdio.h>      /* snprintf */
 #include <stdlib.h>     /* malloc */
-#include <string.h>     /* memcmp */
+#include <string.h>     /* memcmp, strcmp, strstr */
 #include <sys/socket.h> /* send, recv */
 #include <unistd.h>     /* close */
 
 #include "fingerprint.h"
 #include "utils.h"
 
-/* Bytes kept per reply: enough for HTTP headers or a TLS ServerHello. */
-#define REPLY_MAX 2048
+/* Bytes kept per reply: HTTP headers, or a TLS ServerHello plus the server's certificate. */
+#define REPLY_MAX 16384
 /* Largest probe Janus sends (the TLS ClientHello is about 200 bytes). */
 #define PROBE_MAX 512
 #define MAX_PROBES 3
@@ -63,7 +63,7 @@ static size_t build_probe(probe_kind kind, const scan_target *target, unsigned c
     case PROBE_HTTP:
         return http_head_request(target, (char *)buffer, size);
     case PROBE_TLS:
-        return tls_client_hello(buffer, size);
+        return tls_client_hello(buffer, size, target->host_name, false);
     case PROBE_PGSQL:
         return pgsql_ssl_request(buffer, size);
     case PROBE_GREETING:
@@ -95,12 +95,7 @@ static bool reply_incomplete(const unsigned char *reply, size_t length)
         return !contains(reply, length, "\n", 1);
     }
     if (length >= 2 && reply[0] == 0x16 && reply[1] == 0x03) {
-        /* TLS: we only need the first handshake message (the ServerHello). */
-        if (length < 9) {
-            return true;
-        }
-        size_t needed = 9 + ((size_t)reply[6] << 16 | (size_t)reply[7] << 8 | reply[8]);
-        return length < needed;
+        return !tls_reply_complete(reply, length); /* ServerHello, plus the certificate below TLS 1.3 */
     }
     return false;
 }
@@ -147,6 +142,32 @@ static size_t exchange(int fd, const unsigned char *probe, size_t probe_length, 
     return received;
 }
 
+/*
+ * TLS 1.3 encrypts the certificate. Ask once more offering only TLS 1.2,
+ * where it travels in clear text. A server that accepts nothing older than
+ * 1.3 answers with an alert, and the certificate stays unknown.
+ */
+static void fetch_tls12_certificate(const scan_target *target, uint16_t port, const scan_settings *settings,
+                                    tls_certificate *certificate)
+{
+    if (scan_stop_requested()) {
+        return;
+    }
+    int fd = connect_tcp_port(target, port, settings->timeout_ms);
+    if (fd == -1) {
+        return;
+    }
+    unsigned char probe[PROBE_MAX];
+    unsigned char reply[REPLY_MAX];
+    size_t probe_length = tls_client_hello(probe, sizeof probe, target->host_name, true);
+    size_t received = exchange(fd, probe, probe_length, service_wait_ms(settings->timeout_ms), reply, sizeof reply);
+    close(fd);
+    service_info info;
+    if (identify_tcp_reply(PROBE_TLS, reply, received, &info) && info.certificate.present) {
+        *certificate = info.certificate;
+    }
+}
+
 void detect_tcp_service(const scan_target *target, int connected_fd, const scan_settings *settings,
                         port_result *result)
 {
@@ -186,6 +207,9 @@ void detect_tcp_service(const scan_target *target, int connected_fd, const scan_
         }
         service_info info;
         if (identify_tcp_reply(plan[step], reply, received, &info)) {
+            if (strcmp(info.service, "tls") == 0 && !info.certificate.present && strstr(info.info, "TLS 1.3")) {
+                fetch_tls12_certificate(target, result->port, settings, &info.certificate);
+            }
             result->detected = malloc(sizeof *result->detected);
             if (result->detected != NULL) {
                 *result->detected = info;

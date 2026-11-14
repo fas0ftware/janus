@@ -1,7 +1,7 @@
 # Janus
 
 [![CI](https://github.com/fas0ftware/janus/actions/workflows/ci.yml/badge.svg)](https://github.com/fas0ftware/janus/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.6.0-blue)
+![Version](https://img.shields.io/badge/version-1.7.0-blue)
 ![C11](https://img.shields.io/badge/C11-POSIX%20%2B%20pthreads-555)
 ![Checks](https://img.shields.io/badge/ASan%20%C2%B7%20UBSan%20%C2%B7%20TSan%20%C2%B7%20valgrind-clean-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -50,6 +50,10 @@ Named after Janus, the Roman god of gates and doorways. Ports are doors.
   vsftpd, Postfix, Dovecot, VNC, telnet... A silent port gets a hand-written
   TLS ClientHello and an HTTP `HEAD`; nothing else is ever sent. With `--udp`,
   DNS, NTP, NetBIOS (computer name), SSDP and mDNS replies are decoded
+- **TLS certificate check** (with `--sv`): who the certificate is for, who
+  signed it (or that it is self-signed), until when it is valid (**EXPIRED**
+  is flagged), its key (`RSA 2048`, `EC P-256`) and its subjectAltName list.
+  Host names are sent as SNI, so virtual hosts show the right certificate
 - Service names from `/etc/services` (`22` → `ssh`) when `--sv` is not used
 - Human-readable table or **JSON** output for other programs
 - Clean `Ctrl+C`: stops within ~0.1 s and prints partial results
@@ -88,7 +92,8 @@ Usage: janus -t <target> [options]
       --sv              identify what really runs on open ports: service,
                         product and version (OpenSSH 9.6p1, nginx 1.24.0,
                         TLS 1.3, MySQL, ...). Silent ports get a TLS and an
-                        HTTP probe; with --udp, replies are decoded
+                        HTTP probe. TLS ports show their certificate (name,
+                        issuer, expiry, key). With --udp, replies are decoded
       --open            with several hosts, list only hosts with open ports
       --discover        first find which hosts answer (TCP probes, no root
                         needed) and port-scan only those; down hosts are skipped
@@ -164,6 +169,8 @@ Started: 2026-11-14T08:10:00Z
 PORT       STATE    SERVICE          VERSION
 22/tcp     open     ssh              OpenSSH 9.6p1 (Ubuntu-3ubuntu13.5)
 443/tcp    open     tls/https        TLS 1.3, TLS_AES_256_GCM_SHA384
+           cert: nas.home.arpa, self-signed, valid until 2025-03-01, RSA 2048, EXPIRED
+           names: nas.home.arpa, 192.168.1.10
 631/tcp    open     http             CUPS 2.4 (IPP/2.1)
 3306/tcp   open     mysql            MariaDB 10.11.6 (0+deb12u1)
 6379/tcp   open     redis            Redis
@@ -173,7 +180,10 @@ Scanned 6 port(s) in 0.02 s: 6 open, 0 closed, 0 filtered
 ```
 
 (Illustrative output.) A port that answers none of the probes keeps `-` in
-the VERSION column. Add `--banner` to see each port's raw first line under
+the VERSION column. Under a TLS port Janus prints the server certificate:
+here a forgotten NAS whose self-signed certificate ran out. Scan by host name
+(`-t nas.home.arpa`) when one server hosts several sites: the name is sent as
+SNI, so the server presents the certificate for that site. Add `--banner` to see each port's raw first line under
 it. In JSON every open port gets a `detected` object (or `null`):
 
 ```json
@@ -182,7 +192,18 @@ it. In JSON every open port gets a `detected` object (or `null`):
 ```
 
 `service` stays the `/etc/services` name, so programs that read it keep
-working; `detected.service` is what the port actually spoke.
+working; `detected.service` is what the port actually spoke. TLS ports also
+get `detected.certificate`:
+
+```json
+"certificate": {"subject": "nas.home.arpa", "issuer": "nas.home.arpa", "self_signed": true,
+                "not_before": "2024-03-01T10:00:00Z", "not_after": "2025-03-01T10:00:00Z",
+                "expired": true, "not_yet_valid": false, "key": "RSA 2048",
+                "names": ["nas.home.arpa", "192.168.1.10"]}
+```
+
+`expired` is judged against the scan's own `timestamp`. The certificate is
+`null` when the server only speaks TLS 1.3, which encrypts it.
 
 UDP scan of your own machine or router (silent ports show as `open|filtered`):
 
@@ -211,7 +232,7 @@ gains `hosts_up` and `hosts_down`). Every document says `"protocol": "tcp"` or
 $ ./janus -t localhost -p 22,80,443,631,8000 --json
 {
   "scanner": "janus",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "timestamp": "2026-11-11T17:55:00Z",
   "target": "localhost",
   "ip": "127.0.0.1",
@@ -288,7 +309,7 @@ src/
   discovery.c/.h  --discover: parallel TCP probes that decide which hosts are up
   udp_scan.c/.h   --udp: datagram probes, ICMP errors via ECONNREFUSED, DNS/NTP payloads
   version_scan.c/.h  --sv over TCP: which probe to send when, reading replies
-  fingerprint.c/.h   --sv parsers (SSH, HTTP, TLS, MySQL, ...) and the TLS ClientHello
+  fingerprint.c/.h   --sv parsers (SSH, HTTP, TLS, MySQL, ...), X.509 certificates, the TLS ClientHello
   services.c/.h port number -> service name (getservbyport)
   output.c/.h   text table and hand-written JSON with string escaping
   utils.c/.h    error printing, monotonic clock, UTC timestamps
@@ -308,21 +329,23 @@ docs/
 
 ## Tests and checks
 
-`make test` runs 103 C unit checks (target lists, CIDR edge cases such as /31,
-/32 and oversized blocks, banner sanitizing, UDP probe payloads, and 65 for
+`make test` runs 124 C unit checks (target lists, CIDR edge cases such as /31,
+/32 and oversized blocks, banner sanitizing, UDP probe payloads, and 86 for
 `--sv`: every fingerprint parser with real, truncated and hostile replies,
-the TLS ClientHello layout) and 112 end-to-end checks against
+the TLS ClientHello layout and SNI, a real X.509 certificate cut at every
+length and corrupted 2345 ways) and 116 end-to-end checks against
 local listeners: open/closed/filtered, threads (also across hosts), Ctrl+C, write errors, JSON,
 banners (including a listener that sends terminal escape codes), top ports,
 lists, CIDR, `--open`, unresolvable hosts in a list, IPv6 and `-4`/`-6`,
 host discovery (up, down, JSON status, Ctrl+C while probing), UDP (open,
 closed, open|filtered, JSON, Ctrl+C) and `--sv` (SSH, HTTP on an odd port, a
-real TLS server, Redis, MariaDB, a silent service, JSON, Ctrl+C).
+real TLS server with a certificate per SNI name, a TLS 1.3-only server,
+Redis, MariaDB, a silent service, JSON, Ctrl+C).
 
 ![make test](docs/test-results.svg)
 
 (The machine in this picture had no IPv6, so its 4 IPv6 checks were skipped:
-108 of the 112. CI runs all of them.)
+112 of the 116. CI runs all of them.)
 
 `make check` repeats the suite under AddressSanitizer + UBSan, runs valgrind
 with leak checking (including a CIDR + IPv6 + banner scan) and
@@ -360,10 +383,12 @@ it, plus cppcheck.
   service, not necessarily what runs there)
 - `--sv` knows a fixed set of protocols (SSH, HTTP/RTSP, TLS, FTP, SMTP, POP3,
   IMAP, MySQL/MariaDB, PostgreSQL, Redis, memcached, AMQP, VNC, telnet). It
-  has no TLS library, so it reports the TLS version and cipher of `443` but not
-  the web server behind it, and it sends no server name (SNI), so some hosts
-  answer only with a TLS alert. Products that do not name themselves (Postfix
-  hides its version) stay without a version
+  has no TLS library, so it reports the TLS version, cipher and certificate of
+  `443` but not the web server behind it. A server that speaks only TLS 1.3
+  keeps its certificate encrypted (`certificate: null`). The certificate is
+  read, not verified: Janus does not check the signature chain against trusted
+  CAs, it only reports what the server presents. Products that do not name
+  themselves (Postfix hides its version) stay without a version
 - Linux only
 
 ## Roadmap
@@ -371,6 +396,14 @@ it, plus cppcheck.
 - Integration as the scanning engine of `network-monitor` (via `--json`)
 
 ## Changelog
+
+- **1.7.0** – TLS certificates in `--sv`: subject, issuer or self-signed,
+  validity with **EXPIRED** / **NOT YET VALID**, key type and size, and
+  subjectAltName names, from a small bounds-checked DER parser. Host names are
+  sent as SNI. TLS 1.3 servers get a second, TLS 1.2-only ClientHello because
+  1.3 encrypts the certificate. The handshake is reassembled across records.
+  21 new unit checks (a real certificate truncated at every length and
+  corrupted 2345 ways) and 4 end-to-end checks with an SNI-aware TLS server.
 
 - **1.6.0** – `--sv` / `--service-version`: service and version detection.
   Open TCP ports are identified from their greeting or from up to three fixed

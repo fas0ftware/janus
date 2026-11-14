@@ -1,5 +1,7 @@
 #include "fingerprint.h"
 
+#include <arpa/inet.h> /* inet_ntop */
+#include <sys/socket.h> /* AF_INET, AF_INET6 */
 #include <stdio.h>   /* snprintf */
 #include <string.h>  /* memset, memcpy, strlen */
 #include <strings.h> /* strncasecmp */
@@ -290,12 +292,138 @@ static unsigned read_u16(const unsigned char *p)
     return (unsigned)p[0] << 8 | p[1];
 }
 
+static size_t read_u24(const unsigned char *p)
+{
+    return (size_t)p[0] << 16 | (size_t)p[1] << 8 | p[2];
+}
+
+/* Longest handshake stream Janus reassembles (the reply buffer is not larger). */
+#define TLS_STREAM_MAX 16384
+
+/*
+ * A TLS server's first flight can spread its handshake messages over several
+ * records, and one message over several records. Copy the payloads of the
+ * leading handshake records (type 22) into one stream. *ended is set when a
+ * record of another type follows, so nothing more will be added.
+ */
+static size_t tls_handshake_stream(const unsigned char *data, size_t length, unsigned char *stream,
+                                   size_t stream_size, bool *ended)
+{
+    size_t position = 0;
+    size_t used = 0;
+    *ended = false;
+    while (position + 5 <= length) {
+        if (data[position] != 0x16 || data[position + 1] != 0x03) {
+            *ended = true;
+            break;
+        }
+        size_t record_length = read_u16(data + position + 3);
+        size_t present = length - position - 5;
+        size_t take = present < record_length ? present : record_length;
+        if (take > stream_size - used) {
+            take = stream_size - used;
+        }
+        memcpy(stream + used, data + position + 5, take);
+        used += take;
+        if (take < record_length) {
+            break; /* the rest of this record has not arrived (or does not fit) */
+        }
+        position += 5 + record_length;
+    }
+    return used;
+}
+
+/*
+ * ServerHello body (after the 4-byte message header): legacy_version(2)
+ * random(32) session_id(1+n) cipher_suite(2) compression(1) extensions(2+n).
+ * TLS 1.3 servers put 0x0303 in the legacy field and the real version into
+ * the supported_versions extension (43). Returns false if too short.
+ */
+static bool parse_server_hello(const unsigned char *body, size_t length, unsigned *version, unsigned *suite)
+{
+    *version = 0;
+    *suite = 0;
+    if (length < 35) {
+        return false;
+    }
+    *version = read_u16(body);
+    size_t offset = 35 + body[34]; /* skip the session id */
+    if (offset + 3 > length) {
+        return true;
+    }
+    *suite = read_u16(body + offset);
+    offset += 3;
+    if (offset + 2 > length) {
+        return true;
+    }
+    size_t extensions_end = offset + 2 + read_u16(body + offset);
+    if (extensions_end > length) {
+        extensions_end = length;
+    }
+    offset += 2;
+    while (offset + 4 <= extensions_end) {
+        unsigned type = read_u16(body + offset);
+        size_t extension_length = read_u16(body + offset + 2);
+        offset += 4;
+        if (offset + extension_length > extensions_end) {
+            break;
+        }
+        if (type == 0x002b && extension_length == 2) {
+            *version = read_u16(body + offset);
+        }
+        offset += extension_length;
+    }
+    return true;
+}
+
+bool tls_reply_complete(const unsigned char *data, size_t length)
+{
+    if (length >= 1 && data[0] == 0x15) {
+        return true; /* an alert ends the conversation */
+    }
+    unsigned char stream[TLS_STREAM_MAX];
+    bool ended = false;
+    size_t used = tls_handshake_stream(data, length, stream, sizeof stream, &ended);
+    if (used >= 1 && stream[0] != 0x02) {
+        return true; /* not a ServerHello: nothing worth waiting for */
+    }
+    if (used < 4) {
+        return ended;
+    }
+    size_t hello_end = 4 + read_u24(stream + 1);
+    if (used < hello_end) {
+        return ended;
+    }
+    unsigned version = 0;
+    unsigned suite = 0;
+    if (!parse_server_hello(stream + 4, hello_end - 4, &version, &suite) || version >= 0x0304) {
+        return true; /* TLS 1.3 encrypts the certificate: the ServerHello is all there is to read */
+    }
+    /* TLS 1.2 and older: the Certificate message (11) follows in clear text. */
+    size_t offset = hello_end;
+    while (offset + 4 <= used) {
+        unsigned type = stream[offset];
+        size_t message_length = read_u24(stream + offset + 1);
+        if (type == 11) {
+            if (offset + 10 > used) {
+                return ended;
+            }
+            size_t first = read_u24(stream + offset + 7);
+            return ended || used >= offset + 10 + first;
+        }
+        if (type == 14) {
+            return true; /* ServerHelloDone without a certificate */
+        }
+        offset += 4 + message_length;
+    }
+    return ended;
+}
+
 /*
  * A TLS record starts with: content type (22 handshake, 21 alert), version
- * 3.x, and a 2-byte length. A ServerHello inside a handshake record tells the
- * protocol version and cipher suite the server chose. TLS 1.3 servers put
- * 0x0303 in the legacy version field and the real one in the
- * supported_versions extension (43).
+ * 3.x, and a 2-byte length. The ServerHello tells the protocol version and
+ * cipher suite the server chose; in TLS 1.2 and older the next message is the
+ * server's certificate chain, readable without finishing the handshake.
  */
 static bool identify_tls(const unsigned char *data, size_t length, service_info *out)
 {
@@ -316,106 +444,441 @@ static bool identify_tls(const unsigned char *data, size_t length, service_info 
     if (data[0] != 0x16 || data[5] != 0x02 || record_length < 4) {
         return false; /* not a handshake record carrying a ServerHello */
     }
-
-    /* Parse only what both the record header and the bytes received allow. */
-    const unsigned char *hello = data + 5;
-    size_t available = length - 5 < record_length ? length - 5 : record_length;
     set_text(out->service, sizeof out->service, "tls");
 
-    /* type(1) length(3) legacy_version(2) random(32) session_id_length(1) */
-    if (available < 39) {
+    unsigned char stream[TLS_STREAM_MAX];
+    bool ended = false;
+    size_t used = tls_handshake_stream(data, length, stream, sizeof stream, &ended);
+    if (used < 4) {
         return true; /* truncated, but clearly a ServerHello */
     }
-    unsigned version = read_u16(hello + 4);
-    size_t offset = 39 + hello[38]; /* skip the session id */
+    size_t hello_end = 4 + read_u24(stream + 1);
+    size_t hello_available = (used < hello_end ? used : hello_end) - 4;
+    unsigned version = 0;
     unsigned suite = 0;
-    if (offset + 3 <= available) {
-        suite = read_u16(hello + offset);
-        offset += 3; /* cipher suite(2) compression(1) */
-        if (offset + 2 <= available) {
-            size_t extensions_end = offset + 2 + read_u16(hello + offset);
-            if (extensions_end > available) {
-                extensions_end = available;
-            }
-            offset += 2;
-            while (offset + 4 <= extensions_end) {
-                unsigned type = read_u16(hello + offset);
-                size_t extension_length = read_u16(hello + offset + 2);
-                offset += 4;
-                if (offset + extension_length > extensions_end) {
-                    break;
-                }
-                if (type == 0x002b && extension_length == 2) {
-                    version = read_u16(hello + offset);
-                }
-                offset += extension_length;
-            }
-        }
+    if (!parse_server_hello(stream + 4, hello_available, &version, &suite)) {
+        return true; /* truncated, but clearly a ServerHello */
     }
     append_text(out->info, sizeof out->info, ", ", tls_version_name(version));
     append_text(out->info, sizeof out->info, ", ", tls_cipher_name(suite));
+
+    /* Look for the Certificate message and parse the first (the server's own) certificate. */
+    size_t offset = hello_end;
+    while (offset + 4 <= used) {
+        unsigned type = stream[offset];
+        size_t message_length = read_u24(stream + offset + 1);
+        if (type == 11 && offset + 10 <= used) {
+            size_t first = read_u24(stream + offset + 7);
+            size_t available = used - offset - 10;
+            parse_certificate(stream + offset + 10, first < available ? first : available, &out->certificate);
+            break;
+        }
+        offset += 4 + message_length;
+    }
     return true;
 }
 
-size_t tls_client_hello(unsigned char *buffer, size_t buffer_size)
+/* A tiny append-only writer, so the ClientHello can be assembled field by field. */
+typedef struct {
+    unsigned char *data;
+    size_t size;
+    size_t used;
+    bool overflow;
+} byte_writer;
+
+static void put_bytes(byte_writer *writer, const void *bytes, size_t count)
+{
+    if (writer->overflow || count > writer->size - writer->used) {
+        writer->overflow = true;
+        return;
+    }
+    memcpy(writer->data + writer->used, bytes, count);
+    writer->used += count;
+}
+
+static void put_u8(byte_writer *writer, unsigned value)
+{
+    unsigned char byte = (unsigned char)value;
+    put_bytes(writer, &byte, 1);
+}
+
+static void put_u16(byte_writer *writer, size_t value)
+{
+    unsigned char bytes[2] = {(unsigned char)(value >> 8), (unsigned char)value};
+    put_bytes(writer, bytes, 2);
+}
+
+/* Write a length placeholder now, fill it in once the content is known. */
+static void patch_length(byte_writer *writer, size_t at, size_t width)
+{
+    if (writer->overflow) {
+        return;
+    }
+    size_t value = writer->used - at - width;
+    for (size_t i = 0; i < width; i++) {
+        writer->data[at + i] = (unsigned char)(value >> (8 * (width - 1 - i)));
+    }
+}
+
+/* SNI must be a DNS name: letters, digits, '-' and '.', not an IP address literal. */
+static bool valid_server_name(const char *name)
+{
+    size_t length = name != NULL ? strlen(name) : 0;
+    if (length == 0 || length > 253) {
+        return false;
+    }
+    bool has_letter = false;
+    for (size_t i = 0; i < length; i++) {
+        char c = name[i];
+        bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        has_letter |= letter;
+        if (!letter && !is_digit((unsigned char)c) && c != '-' && c != '.') {
+            return false;
+        }
+    }
+    return has_letter;
+}
+
+size_t tls_client_hello(unsigned char *buffer, size_t buffer_size, const char *server_name, bool tls12_only)
 {
     /* RFC 7748 example public key: any 32 bytes work as an X25519 share for a probe. */
     static const unsigned char key_share[32] = {
         0x85, 0x20, 0xf0, 0x09, 0x89, 0x30, 0xa7, 0x54, 0x74, 0x8b, 0x7d, 0xdc, 0xb4, 0x3e, 0xf7, 0x5a,
         0x0d, 0xbf, 0x3a, 0x0d, 0x26, 0x38, 0x1a, 0xf4, 0xeb, 0xa4, 0xa9, 0x8e, 0xaa, 0x9b, 0x4e, 0x6a,
     };
+    static const unsigned char tls13_suites[] = {0x13, 0x01, 0x13, 0x02, 0x13, 0x03};
     static const unsigned char suites[] = {
-        0x13, 0x01, 0x13, 0x02, 0x13, 0x03, /* TLS 1.3 */
         0xc0, 0x2b, 0xc0, 0x2f, 0xc0, 0x2c, 0xc0, 0x30, 0xcc, 0xa9, 0xcc, 0xa8, /* ECDHE + AEAD */
         0xc0, 0x13, 0xc0, 0x14, 0x00, 0x9c, 0x00, 0x9d, 0x00, 0x2f, 0x00, 0x35, 0x00, 0x0a, /* older */
     };
-    static const unsigned char extensions[] = {
+    static const unsigned char common_extensions[] = {
         0x00, 0x0a, 0x00, 0x08, 0x00, 0x06, 0x00, 0x1d, 0x00, 0x17, 0x00, 0x18, /* groups: x25519, P-256, P-384 */
         0x00, 0x0b, 0x00, 0x02, 0x01, 0x00,                                     /* EC point formats: uncompressed */
         0x00, 0x0d, 0x00, 0x14, 0x00, 0x12, 0x04, 0x03, 0x05, 0x03, 0x08, 0x04, /* signature algorithms */
         0x08, 0x05, 0x08, 0x06, 0x04, 0x01, 0x05, 0x01, 0x06, 0x01, 0x02, 0x01,
+    };
+    static const unsigned char tls13_extensions[] = {
         0x00, 0x2b, 0x00, 0x05, 0x04, 0x03, 0x04, 0x03, 0x03, /* supported versions: 1.3, 1.2 */
         0x00, 0x2d, 0x00, 0x02, 0x01, 0x01,                   /* PSK modes (expected by TLS 1.3 servers) */
         0x00, 0x33, 0x00, 0x26, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20, /* key share: x25519, 32 bytes follow */
     };
 
-    size_t body_length = 2 + 32 + 1 + 2 + sizeof suites + 2 + 2 + sizeof extensions + sizeof key_share;
-    size_t total = 5 + 4 + body_length;
-    if (buffer_size < total) {
-        return 0;
+    byte_writer w = {buffer, buffer_size, 0, false};
+    put_u8(&w, 0x16); /* handshake record */
+    put_u16(&w, 0x0301); /* record version TLS 1.0, as browsers send for compatibility */
+    size_t record_at = w.used;
+    put_u16(&w, 0);
+    put_u8(&w, 0x01); /* ClientHello */
+    size_t hello_at = w.used;
+    put_u8(&w, 0); /* 3-byte length, filled in at the end */
+    put_u16(&w, 0);
+    put_u16(&w, 0x0303); /* legacy version TLS 1.2 */
+    for (unsigned i = 0; i < 32; i++) {
+        put_u8(&w, 0x4a + i); /* "random": fixed, this is only a probe */
     }
-    unsigned char *p = buffer;
-    size_t record_length = 4 + body_length;
-    size_t extensions_length = sizeof extensions + sizeof key_share;
+    put_u8(&w, 0); /* no session id */
+    put_u16(&w, (tls12_only ? 0 : sizeof tls13_suites) + sizeof suites);
+    if (!tls12_only) {
+        put_bytes(&w, tls13_suites, sizeof tls13_suites);
+    }
+    put_bytes(&w, suites, sizeof suites);
+    put_u8(&w, 1); /* one compression method: */
+    put_u8(&w, 0); /* none */
+    size_t extensions_at = w.used;
+    put_u16(&w, 0);
+    if (valid_server_name(server_name)) {
+        size_t name_length = strlen(server_name);
+        put_u16(&w, 0x0000);          /* server_name */
+        put_u16(&w, name_length + 5); /* extension length */
+        put_u16(&w, name_length + 3); /* list length */
+        put_u8(&w, 0);                /* type: host name */
+        put_u16(&w, name_length);
+        put_bytes(&w, server_name, name_length);
+    }
+    put_bytes(&w, common_extensions, sizeof common_extensions);
+    if (!tls12_only) {
+        put_bytes(&w, tls13_extensions, sizeof tls13_extensions);
+        put_bytes(&w, key_share, sizeof key_share);
+    }
+    patch_length(&w, extensions_at, 2);
+    patch_length(&w, hello_at, 3);
+    patch_length(&w, record_at, 2);
+    return w.overflow ? 0 : w.used;
+}
 
-    *p++ = 0x16; /* handshake record */
-    *p++ = 0x03;
-    *p++ = 0x01; /* record version TLS 1.0, as browsers send for compatibility */
-    *p++ = (unsigned char)(record_length >> 8);
-    *p++ = (unsigned char)record_length;
-    *p++ = 0x01; /* ClientHello */
-    *p++ = 0x00;
-    *p++ = (unsigned char)(body_length >> 8);
-    *p++ = (unsigned char)body_length;
-    *p++ = 0x03;
-    *p++ = 0x03; /* legacy version TLS 1.2 */
-    for (int i = 0; i < 32; i++) {
-        *p++ = (unsigned char)(0x4a + i); /* "random": fixed, this is only a probe */
+/* ---- X.509 certificates (DER) ------------------------------------------------------ */
+
+/*
+ * DER encodes everything as tag, length, value. A der_span is a window into
+ * the certificate; der_next() takes one element off its front and refuses
+ * any length that points outside the window, so a hostile certificate can
+ * never make the parser read past the bytes received.
+ */
+typedef struct {
+    const unsigned char *data;
+    size_t length;
+} der_span;
+
+static bool der_next(der_span *in, unsigned char *tag, der_span *value, der_span *whole)
+{
+    if (in->length < 2 || (in->data[0] & 0x1f) == 0x1f) {
+        return false; /* too short, or a multi-byte tag (never used in certificates) */
     }
-    *p++ = 0x00; /* no session id */
-    *p++ = 0x00;
-    *p++ = (unsigned char)sizeof suites;
-    memcpy(p, suites, sizeof suites);
-    p += sizeof suites;
-    *p++ = 0x01; /* one compression method: */
-    *p++ = 0x00; /* none */
-    *p++ = (unsigned char)(extensions_length >> 8);
-    *p++ = (unsigned char)extensions_length;
-    memcpy(p, extensions, sizeof extensions);
-    p += sizeof extensions;
-    memcpy(p, key_share, sizeof key_share);
-    p += sizeof key_share;
-    return (size_t)(p - buffer);
+    size_t length = in->data[1];
+    size_t header = 2;
+    if (length & 0x80) {
+        size_t count = length & 0x7f;
+        if (count == 0 || count > 3 || in->length < 2 + count) {
+            return false;
+        }
+        length = 0;
+        for (size_t i = 0; i < count; i++) {
+            length = length << 8 | in->data[2 + i];
+        }
+        header += count;
+    }
+    if (length > in->length - header) {
+        return false;
+    }
+    *tag = in->data[0];
+    value->data = in->data + header;
+    value->length = length;
+    if (whole != NULL) {
+        whole->data = in->data;
+        whole->length = header + length;
+    }
+    in->data += header + length;
+    in->length -= header + length;
+    return true;
+}
+
+static bool der_expect(der_span *in, unsigned char wanted, der_span *value)
+{
+    unsigned char tag = 0;
+    return der_next(in, &tag, value, NULL) && tag == wanted;
+}
+
+static bool oid_is(der_span oid, const unsigned char *expected, size_t expected_length)
+{
+    return oid.length == expected_length && memcmp(oid.data, expected, expected_length) == 0;
+}
+
+/* Directory string types: UTF8String, PrintableString, T61String, IA5String, BMPString. */
+static bool is_string_tag(unsigned char tag)
+{
+    return tag == 0x0c || tag == 0x13 || tag == 0x14 || tag == 0x16 || tag == 0x1e;
+}
+
+/* Value of the attribute 2.5.4.<attribute> (3 = CN, 10 = O, 11 = OU) in a Name, or false. */
+static bool name_attribute(der_span name, unsigned char attribute, char *out, size_t out_size)
+{
+    der_span set;
+    while (der_expect(&name, 0x31, &set)) {
+        der_span pair;
+        while (der_expect(&set, 0x30, &pair)) {
+            der_span oid;
+            der_span value;
+            unsigned char tag = 0;
+            const unsigned char expected[3] = {0x55, 0x04, attribute};
+            if (der_expect(&pair, 0x06, &oid) && der_next(&pair, &tag, &value, NULL) && is_string_tag(tag) &&
+                oid_is(oid, expected, sizeof expected)) {
+                copy_text(out, out_size, value.data, value.length);
+                return out[0] != '\0';
+            }
+        }
+    }
+    return false;
+}
+
+static void name_label(der_span name, char *out, size_t out_size)
+{
+    if (!name_attribute(name, 3, out, out_size) && !name_attribute(name, 10, out, out_size)) {
+        name_attribute(name, 11, out, out_size);
+    }
+}
+
+/* UTCTime "YYMMDDHHMMSSZ" or GeneralizedTime "YYYYMMDDHHMMSSZ" -> "YYYY-MM-DDTHH:MM:SSZ". */
+static bool parse_time(unsigned char tag, der_span value, char *out, size_t out_size)
+{
+    size_t digits = tag == 0x17 ? 12 : tag == 0x18 ? 14 : 0;
+    if (digits == 0 || value.length != digits + 1 || value.data[digits] != 'Z' || out_size < CERT_TIME_SIZE) {
+        return false;
+    }
+    for (size_t i = 0; i < digits; i++) {
+        if (!is_digit(value.data[i])) {
+            return false;
+        }
+    }
+    const unsigned char *t = value.data;
+    char year[5];
+    if (tag == 0x17) {
+        /* RFC 5280: two-digit years 50-99 are 19xx, 00-49 are 20xx. */
+        bool old = t[0] >= '5';
+        year[0] = old ? '1' : '2';
+        year[1] = old ? '9' : '0';
+        year[2] = (char)t[0];
+        year[3] = (char)t[1];
+        t += 2;
+    } else {
+        memcpy(year, t, 4);
+        t += 4;
+    }
+    year[4] = '\0';
+    snprintf(out, out_size, "%s-%c%c-%c%cT%c%c:%c%c:%c%cZ", year, t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7],
+             t[8], t[9]);
+    return true;
+}
+
+/* "RSA 2048", "EC P-256", "Ed25519" from SubjectPublicKeyInfo. */
+static void describe_key(der_span info, char *out, size_t out_size)
+{
+    static const unsigned char rsa[] = {0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01};
+    static const unsigned char ec[] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01};
+    static const unsigned char p256[] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07};
+    static const unsigned char p384[] = {0x2b, 0x81, 0x04, 0x00, 0x22};
+    static const unsigned char p521[] = {0x2b, 0x81, 0x04, 0x00, 0x23};
+    static const unsigned char ed25519[] = {0x2b, 0x65, 0x70};
+    static const unsigned char ed448[] = {0x2b, 0x65, 0x71};
+
+    der_span algorithm;
+    der_span oid;
+    der_span bits;
+    if (!der_expect(&info, 0x30, &algorithm) || !der_expect(&algorithm, 0x06, &oid) ||
+        !der_expect(&info, 0x03, &bits)) {
+        return;
+    }
+    if (oid_is(oid, rsa, sizeof rsa)) {
+        /* BIT STRING: one "unused bits" byte, then SEQUENCE { modulus INTEGER, exponent INTEGER }. */
+        der_span key = {bits.data + 1, bits.length > 0 ? bits.length - 1 : 0};
+        der_span sequence;
+        der_span modulus;
+        if (bits.length < 1 || !der_expect(&key, 0x30, &sequence) || !der_expect(&sequence, 0x02, &modulus)) {
+            set_text(out, out_size, "RSA");
+            return;
+        }
+        while (modulus.length > 0 && modulus.data[0] == 0) {
+            modulus.data++;
+            modulus.length--;
+        }
+        size_t key_bits = modulus.length * 8;
+        for (unsigned char top = modulus.length ? modulus.data[0] : 0x80; key_bits > 0 && !(top & 0x80); top <<= 1) {
+            key_bits--;
+        }
+        snprintf(out, out_size, "RSA %zu", key_bits);
+    } else if (oid_is(oid, ec, sizeof ec)) {
+        der_span curve;
+        const char *name = "";
+        if (der_expect(&algorithm, 0x06, &curve)) {
+            name = oid_is(curve, p256, sizeof p256)   ? " P-256"
+                   : oid_is(curve, p384, sizeof p384) ? " P-384"
+                   : oid_is(curve, p521, sizeof p521) ? " P-521"
+                                                      : "";
+        }
+        snprintf(out, out_size, "EC%s", name);
+    } else if (oid_is(oid, ed25519, sizeof ed25519)) {
+        set_text(out, out_size, "Ed25519");
+    } else if (oid_is(oid, ed448, sizeof ed448)) {
+        set_text(out, out_size, "Ed448");
+    }
+}
+
+/* subjectAltName: dNSName [2] and iPAddress [7] entries. */
+static void read_alt_names(der_span value, tls_certificate *out)
+{
+    der_span names;
+    if (!der_expect(&value, 0x30, &names)) {
+        return;
+    }
+    unsigned char tag = 0;
+    der_span name;
+    while (out->name_count < CERT_MAX_NAMES && der_next(&names, &tag, &name, NULL)) {
+        char *slot = out->names[out->name_count];
+        if (tag == 0x82) {
+            copy_text(slot, CERT_TEXT_SIZE, name.data, name.length);
+        } else if (tag == 0x87 && (name.length == 4 || name.length == 16)) {
+            inet_ntop(name.length == 4 ? AF_INET : AF_INET6, name.data, slot, CERT_TEXT_SIZE);
+        } else {
+            continue; /* e-mail addresses, URIs, ... */
+        }
+        if (slot[0] != '\0') {
+            out->name_count++;
+        }
+    }
+}
+
+bool parse_certificate(const unsigned char *der, size_t length, tls_certificate *out)
+{
+    static const unsigned char alt_names_oid[] = {0x55, 0x1d, 0x11};
+    memset(out, 0, sizeof *out);
+    der_span input = {der, length};
+    der_span certificate;
+    der_span tbs;
+    if (!der_expect(&input, 0x30, &certificate) || !der_expect(&certificate, 0x30, &tbs)) {
+        return false;
+    }
+    unsigned char tag = 0;
+    der_span value;
+    if (tbs.length > 0 && tbs.data[0] == 0xa0 && !der_next(&tbs, &tag, &value, NULL)) {
+        return false; /* [0] version */
+    }
+    der_span issuer;
+    der_span issuer_whole;
+    der_span validity;
+    der_span subject;
+    der_span subject_whole;
+    der_span key_info;
+    if (!der_expect(&tbs, 0x02, &value) || /* serial number */
+        !der_expect(&tbs, 0x30, &value) || /* signature algorithm */
+        !der_next(&tbs, &tag, &issuer, &issuer_whole) || tag != 0x30 || !der_expect(&tbs, 0x30, &validity) ||
+        !der_next(&tbs, &tag, &subject, &subject_whole) || tag != 0x30 || !der_expect(&tbs, 0x30, &key_info)) {
+        return false;
+    }
+    der_span time;
+    if (!der_next(&validity, &tag, &time, NULL) || !parse_time(tag, time, out->not_before, sizeof out->not_before) ||
+        !der_next(&validity, &tag, &time, NULL) || !parse_time(tag, time, out->not_after, sizeof out->not_after)) {
+        return false;
+    }
+    name_label(subject, out->subject, sizeof out->subject);
+    name_label(issuer, out->issuer, sizeof out->issuer);
+    out->self_signed = issuer_whole.length == subject_whole.length &&
+                       memcmp(issuer_whole.data, subject_whole.data, issuer_whole.length) == 0;
+    describe_key(key_info, out->key, sizeof out->key);
+
+    /* Optional fields; extensions are [3] { SEQUENCE OF { OID, critical BOOLEAN?, OCTET STRING } }. */
+    while (der_next(&tbs, &tag, &value, NULL)) {
+        der_span extensions;
+        if (tag != 0xa3 || !der_expect(&value, 0x30, &extensions)) {
+            continue;
+        }
+        der_span extension;
+        while (der_expect(&extensions, 0x30, &extension)) {
+            der_span oid;
+            der_span content;
+            if (!der_expect(&extension, 0x06, &oid)) {
+                continue;
+            }
+            if (extension.length > 0 && extension.data[0] == 0x01 && !der_next(&extension, &tag, &content, NULL)) {
+                continue;
+            }
+            if (der_expect(&extension, 0x04, &content) && oid_is(oid, alt_names_oid, sizeof alt_names_oid)) {
+                read_alt_names(content, out);
+            }
+        }
+    }
+    out->present = true;
+    return true;
+}
+
+bool certificate_expired(const tls_certificate *certificate, const char *now)
+{
+    return certificate->present && certificate->not_after[0] != '\0' && now[0] != '\0' &&
+           strcmp(certificate->not_after, now) < 0;
+}
+
+bool certificate_not_yet_valid(const tls_certificate *certificate, const char *now)
+{
+    return certificate->present && certificate->not_before[0] != '\0' && now[0] != '\0' &&
+           strcmp(now, certificate->not_before) < 0;
 }
 
 size_t pgsql_ssl_request(unsigned char *buffer, size_t buffer_size)
